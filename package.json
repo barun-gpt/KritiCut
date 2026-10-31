@@ -1,1 +1,31 @@
-{"name":"kriticut","version":"1.0.0","private":true,"dependencies":{"@capacitor/android":"^7.0.0","@capacitor/core":"^7.0.0","@capacitor/filesystem":"^7.0.0","@capacitor/share":"^7.0.0"},"devDependencies":{"@capacitor/cli":"^7.0.0"}}
+{
+  "name": "kriticut",
+  "version": "1.0.0",
+  "private": true,
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start --lan",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "serve:www": "python -m http.server 8080 --directory ./www"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/filesystem": "^7.0.0",
+    "@capacitor/share": "^7.0.0",
+    "expo": "~53.0.0",
+    "expo-status-bar": "~2.2.3",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "react-native": "0.79.6",
+    "react-native-web": "~0.20.0",
+    "react-native-webview": "13.13.5"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.0.0",
+    "@expo/metro-runtime": "~5.0.0",
+    "babel-preset-expo": "~13.0.0"
+  }
+}
