@@ -1,83 +1,144 @@
 /* ============================================================
-   KritiCut v2.0 — Full-featured mobile video editor
+   KritiCut v2.1 — offline-first mobile video editor
+   Single-page canvas editor. No build step, no framework.
    ============================================================ */
 (() => {
 'use strict';
 
-// ---------- helpers ----------
-const $ = (s,p=document) => p.querySelector(s);
-const $$ = (s,p=document) => [...p.querySelectorAll(s)];
-const clamp = (v,a,b) => Math.max(a, Math.min(b,v));
-const uid = () => 'id'+Math.random().toString(36).slice(2,9);
-const fmtTime = s => { if(!isFinite(s)||s<0)s=0; const m=Math.floor(s/60),sec=Math.floor(s%60); return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`; };
-const escapeHtml = s => (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const toast = msg => { const el=$('#toast'); el.textContent=msg; el.classList.remove('hidden'); clearTimeout(toast._t); toast._t=setTimeout(()=>el.classList.add('hidden'),1800); };
-const installClip = c => { c.duration = function(){ return this.end - this.start; }; return c; };
+/* ---------------- helpers ---------------- */
+const $ = (s, p = document) => p.querySelector(s);
+const $$ = (s, p = document) => [...p.querySelectorAll(s)];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const uid = () => 'id' + Math.random().toString(36).slice(2, 9);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmtTime = s => {
+  if (!Number.isFinite(s) || s < 0) s = 0;
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+};
+const toast = msg => {
+  const el = $('#toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.remove('hidden');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.add('hidden'), 2200);
+};
+const installClip = c => {
+  Object.defineProperty(c, 'duration', {
+    value: function () { return Math.max(0, this.end - this.start); },
+    writable: true, configurable: true, enumerable: false
+  });
+  return c;
+};
+const serializeClip = c => {
+  const o = {};
+  for (const k in c) {
+    if (k === '_kf' || k === 'duration') continue;
+    if (typeof c[k] === 'function') continue;
+    o[k] = c[k];
+  }
+  return o;
+};
+const readNum = (key, fallback) => {
+  try {
+    const n = parseFloat(localStorage.getItem(key));
+    return Number.isFinite(n) ? n : fallback;
+  } catch (e) { return fallback; }
+};
+const writeLS = (key, value) => { try { localStorage.setItem(key, String(value)); } catch (e) {} };
+const removeLS = key => { try { localStorage.removeItem(key); } catch (e) {} };
 
-// ---------- state ----------
+const ASPECTS = Object.freeze({ '9:16': 9 / 16, '16:9': 16 / 9, '1:1': 1, '4:5': 4 / 5 });
+const TL_MIN = 240;
+const MAX_HISTORY = 50;
+
+/* ---------------- state ---------------- */
+const screenH = window.innerHeight || 800;
 const S = {
   clips: [],
   mediaLib: [],
   selId: null,
   playhead: 0,
   playing: false,
+  exporting: false,
   zoom: 1,
   pxPerSec: 60,
-  trackLabelW: 66,
+  aspect: '9:16',
+  projectName: 'My Project',
   tab: 'edit',
+  tlHeight: clamp(readNum('kc_tlh', 250), TL_MIN, Math.min(600, Math.round(screenH * 0.65))),
   history: [],
   historyIdx: -1,
+
   videoEls: new Map(),
   imageEls: new Map(),
   audioEls: new Map(),
   audioCtx: null,
   master: null,
-  activeAudio: [],
-  playWall: 0, playStart: 0,
-  tlHeight: parseInt(localStorage.getItem('kc_tlh')||'240',10),
+  sources: new Map(),
+  activeAudio: new Map(),
+  primed: new WeakSet(),
+
+  playWall: 0,
+  playStart: 0,
   editingTextClip: null,
   textDraft: {},
+  textEls: new Map(),
+
+  exportWM: false,
+  exportDest: null,
+  exportScale: 1,
+  exportActive: false,
+  exportCancelled: false,
+  lastExport: null,
+
+  _dirtyT: null,
+  _saveChain: Promise.resolve(),
+  _storageWarned: false,
+  _restoring: false,
+  _importing: false,
+  _openingDraft: false,
+  _noAutoScroll: false,
+  _homeBound: false,
+  _dragBound: false,
+  _exportStartedAt: 0,
+  _exportPrev: null,
+  _welcomeId: null,
+  _rec: null,
 };
 
-// ---------- DOM ----------
+/* ---------------- DOM ---------------- */
 const canvas = $('#previewCanvas');
-const ctx = canvas.getContext('2d',{alpha:false});
+const ctx = canvas.getContext('2d', { alpha: false });
 const overlay = $('#overlayLayer');
+const editorScreen = $('#editorScreen');
+const homeScreen = $('#homeScreen');
 
-// ============================================================
-// Boot
-// ============================================================
-function boot(){
-  try { init(); S._booted = true; }
-  catch(err) {
+/* ---------------- boot ---------------- */
+function boot() {
+  try {
+    init();
+    S._booted = true;
+  } catch (err) {
     console.error('KritiCut init error:', err);
     const el = document.createElement('div');
-    el.style.cssText='position:fixed;bottom:20px;left:20px;right:20px;background:#ff5470;color:#fff;padding:14px;border-radius:10px;z-index:99999;font-size:13px;font-family:monospace;box-shadow:0 8px 24px rgba(0,0,0,0.5)';
-    el.textContent='Init error: '+err.message;
+    el.style.cssText = 'position:fixed;bottom:20px;left:20px;right:20px;background:#ff5470;color:#fff;padding:14px;border-radius:10px;z-index:99999;font-size:13px;font-family:monospace;box-shadow:0 8px 24px rgba(0,0,0,.5)';
+    el.textContent = 'KritiCut could not start: ' + (err && err.message ? err.message : err);
     document.body.appendChild(el);
   }
 }
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', ()=>setTimeout(boot,30), {once:true});
+  document.addEventListener('DOMContentLoaded', () => setTimeout(boot, 20), { once: true });
 } else {
-  setTimeout(boot,30);
+  setTimeout(boot, 20);
 }
 
-/* Global delegated close button — always works even if per-modal setup fails */
-document.addEventListener('click', (e) => {
-  const btn = e.target.closest('.close-btn, [data-close]');
-  if (btn) {
-    const modal = btn.closest('.modal');
-    if (modal) { modal.classList.add('hidden'); e.stopPropagation(); e.preventDefault(); }
-  }
-  // Click on modal backdrop to close
-  if (e.target.classList && e.target.classList.contains('modal')) {
-    e.target.classList.add('hidden');
-  }
-}, true);
+window.addEventListener('unhandledrejection', e => console.warn('KritiCut async error:', e.reason));
 
 function init() {
   buildHome();
+  setupModals();
   setupEditorChrome();
   setupCanvas();
   setupTimeline();
@@ -91,1024 +152,3399 @@ function init() {
   setupImport();
   setupUndoRedo();
   setupKeyboard();
-}
-
-// ============================================================
-// Home / Landing
-// ============================================================
-function showHome() {
-  $('#homeScreen').classList.remove('hidden');
-  $('#editorScreen').classList.add('hidden');
-  stopPlayback();
-}
-function showEditor() {
-  $('#homeScreen').classList.add('hidden');
-  $('#editorScreen').classList.remove('hidden');
-  requestAnimationFrame(() => { resizeCanvas(); renderTimeline(); updatePlayheadUI(); render(); });
-}
-function buildHome() {
-  // New project
-  $('#btnNewProject').addEventListener('click', () => { newProject(); showEditor(); });
-  $('#btnOpenProject').addEventListener('click', () => {
-    const data = localStorage.getItem('kc_draft');
-    if (!data) { toast('No saved draft'); return; }
-    try {
-      const d = JSON.parse(data);
-      S.clips = d.clips.map(c => installClip({...c}));
-      // Re-create elements for media lib
-      d.mediaLib.forEach(m => {
-        if (m.src && m.type === 'video') {
-          // Can't revive blob URLs across reloads — skip videos from drafts
-        }
-      });
-      showEditor();
-      toast('Draft loaded');
-    } catch(e) { toast('Failed to open draft'); }
+  attachOverlayDrag();
+  updateUR();
+  window.addEventListener('pagehide', () => { saveDraft().catch(() => {}); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') saveDraft().catch(() => {});
   });
-  $('#btnImportPresetHome').addEventListener('click', () => $('#homePresetFile').click());
-  $('#homePresetFile').addEventListener('change', e => importPresetFile(e.target.files[0], true));
+  registerServiceWorker();
+}
 
-  // Templates
-  const tg = $('#templateGrid'); tg.innerHTML = '';
-  TEMPLATES.forEach(t => {
-    const el = document.createElement('div');
+/* ---------------- home ---------------- */
+function buildHome() {
+  if (!S._homeBound) {
+    $('#btnNewProject').addEventListener('click', () => {
+      startNewProject({ welcome: true });
+      toast('New project — tap Import to add media');
+    });
+    $('#btnOpenProject').addEventListener('click', openDraft);
+    $('#btnImportPresetHome').addEventListener('click', () => $('#homePresetFile').click());
+    $('#homePresetFile').addEventListener('change', e => {
+      const f = e.target.files && e.target.files[0];
+      if (f) importPresetFile(f, true);
+      e.target.value = '';
+    });
+    S._homeBound = true;
+  }
+  refreshHome();
+}
+
+function refreshHome() {
+  const tg = $('#templateGrid');
+  tg.innerHTML = '';
+  (window.TEMPLATES || []).forEach(t => {
+    const el = document.createElement('button');
+    el.type = 'button';
     el.className = 'template-card';
     el.style.background = t.color;
-    el.innerHTML = `<div class="tpl-tag">${t.tag}</div><div class="tpl-name">${t.name}</div><button class="tpl-use">Use</button>`;
-    $('.tpl-use', el).addEventListener('click', () => {
-      newProject();
-      addWelcomeClip();
-      // Apply preset to welcome clip
-      const w = S.clips[0];
-      w.filters = {...(t.preset.filters||{})};
-      saveHistory();
-      showEditor();
-      toast(`Template "${t.name}" applied — add your media`);
+    el.innerHTML = `<span class="tpl-tag">${esc(t.tag)}</span><span class="tpl-name">${esc(t.name)}</span><span class="tpl-use">Use</span>`;
+    el.addEventListener('click', () => {
+      startNewProject({ welcome: true, filters: t.preset && t.preset.filters });
+      toast(`Template “${t.name}” applied — add your media`);
     });
     tg.appendChild(el);
   });
 
-  // Home preset chips
-  const pc = $('#homePresetChips'); pc.innerHTML = '';
-  [...BUILTIN_PRESETS, ...loadUserPresets()].forEach(p => {
-    const c = document.createElement('div');
+  const pc = $('#homePresetChips');
+  pc.innerHTML = '';
+  const presets = [...(window.BUILTIN_PRESETS || []), ...loadUserPresets()];
+  if (!presets.length) {
+    pc.innerHTML = '<span class="panel-hint">No presets yet — save one from a clip.</span>';
+  }
+  presets.forEach(p => {
+    const c = document.createElement('button');
+    c.type = 'button';
     c.className = 'chip';
-    c.innerHTML = `<div class="chip-preview" style="background:linear-gradient(135deg,#4ea8ff,#25c38e)"></div>${escapeHtml(p.name)}`;
+    c.innerHTML = `<span class="chip-preview" style="background:linear-gradient(135deg,#4ea8ff,#25c38e)"></span>${esc(p.name)}`;
     c.addEventListener('click', () => {
-      newProject(); addWelcomeClip();
-      const w = S.clips[0];
-      w.filters = {...(p.data.filters||{})};
-      saveHistory(); showEditor();
-      toast(`Preset "${p.name}" loaded`);
+      startNewProject({ welcome: true, filters: p.data && sanitizeFilters(p.data.filters) });
+      toast(`Preset “${p.name}” loaded`);
     });
     pc.appendChild(c);
   });
 }
 
-function newProject() {
-  S.clips = []; S.mediaLib = []; S.selId = null; S.playhead = 0;
-  S.history = []; S.historyIdx = -1;
-  S.videoEls.clear(); S.imageEls.clear(); S.audioEls.clear();
+function startNewProject(opts = {}) {
+  resetEditor({
+    name: opts.name || 'My Project',
+    aspect: opts.aspect || '9:16'
+  });
+  S._welcomeId = null;
+  if (opts.welcome !== false) {
+    const w = makeWelcome(0, 10, true);
+    if (opts.filters) w.filters = { ...opts.filters };
+    S.clips.push(w);
+    S._welcomeId = w.id;
+  }
+  S.history = [];
+  S.historyIdx = -1;
+  saveHistory();
+  showEditor();
+  queueSave();
+  // The previous project's media blobs are no longer referenced by the draft.
+  queueSave().then(() => {
+    if (!S.mediaLib.length && !S._importing && !S._restoring) cleanupOrphanMedia(new Set()).catch(() => {});
+  }).catch(() => {});
 }
 
-// ============================================================
-// Editor chrome
-// ============================================================
-function setupEditorChrome() {
-  $('#btnHome').addEventListener('click', () => {
-    // Autosave
-    try { localStorage.setItem('kc_draft', JSON.stringify({clips:S.clips.map(c=>{const x={...c};delete x.duration;return x;}),mediaLib:S.mediaLib})); } catch(e){}
-    showHome();
+function resetEditor(opts = {}) {
+  stopPlayback();
+  S.clips = [];
+  clearMediaLibrary();
+  S.selId = null;
+  S._welcomeId = null;
+  S.playhead = 0;
+  S.zoom = 1;
+  S.pxPerSec = 60;
+  S.aspect = ASPECTS[opts.aspect] ? opts.aspect : '9:16';
+  S.projectName = opts.name || 'My Project';
+  S.history = [];
+  S.historyIdx = -1;
+  S.tab = 'edit';
+  S.editingTextClip = null;
+  clearTextElements();
+  const inline = $('#inlinePanel');
+  if (inline) inline.remove();
+  $$('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === 'edit'));
+  hideClipPanel();
+  const scroller = $('#timelineScroll');
+  if (scroller) scroller.scrollLeft = 0;
+  const nameEl = $('#projectName');
+  if (nameEl) nameEl.textContent = S.projectName;
+  const aspectEl = $('#aspectSelect');
+  if (aspectEl) aspectEl.value = S.aspect;
+  $('#zoomVal').textContent = S.zoom.toFixed(1) + '×';
+  $('#expResult').classList.add('hidden');
+  $('#exportPreview').removeAttribute('src');
+  if (S.lastExport && S.lastExport.url) {
+    try { URL.revokeObjectURL(S.lastExport.url); } catch (e) {}
+  }
+  S.lastExport = null;
+  const dl = $('#downloadBtn');
+  if (dl) dl.removeAttribute('href');
+}
+
+function showHome() {
+  saveDraft().catch(() => {});
+  stopPlayback();
+  editorScreen.classList.add('hidden');
+  homeScreen.classList.remove('hidden');
+  refreshHome();
+}
+
+function showEditor() {
+  homeScreen.classList.add('hidden');
+  editorScreen.classList.remove('hidden');
+  $('#projectName').textContent = S.projectName;
+  $('#aspectSelect').value = S.aspect;
+  const zv = $('#zoomVal');
+  if (zv) zv.textContent = S.zoom.toFixed(1) + '×';
+  setTab(S.tab || 'edit');
+  requestAnimationFrame(() => {
+    resizeCanvas();
+    renderTimeline();
+    updatePlayheadUI();
+    render();
   });
-  $('#btnPreset').addEventListener('click', () => openPresetModal());
-  $('#btnAdd').addEventListener('click', () => $('#importModal').classList.remove('hidden'));
+  setTimeout(() => { resizeCanvas(); renderTimeline(); }, 120);
+}
+
+function clearTextElements() {
+  for (const el of S.textEls.values()) el.remove();
+  S.textEls.clear();
+}
+
+/* ---------------- media library primitives ---------------- */
+function clearMediaLibrary() {
+  for (const m of S.mediaLib) {
+    if (m.src) { try { URL.revokeObjectURL(m.src); } catch (e) {} }
+  }
+  S.mediaLib = [];
+  S.videoEls.clear();
+  S.imageEls.clear();
+  S.audioEls.clear();
+  S.sources.clear();
+  S.activeAudio.clear();
+  const lib = $('#mediaLibrary');
+  if (lib) lib.innerHTML = '';
+}
+
+function makeWelcome(s = 0, e = 10, starter = false) {
+  return installClip({
+    id: uid(), type: 'procedural', name: 'Welcome', start: s, end: e,
+    offset: 0, mediaDur: e - s, z: 1, filters: {}, speed: 1, volume: 1,
+    opacity: 1, scale: 1, rotation: 0, x: 0.5, y: 0.5,
+    starter: !!starter
+  });
+}
+
+function takeWelcomePlaceholder() {
+  const id = S._welcomeId;
+  S._welcomeId = null;
+  if (!id) return null;
+  const w = S.clips.find(c => c.id === id);
+  if (!w || w.type !== 'procedural') return null;
+  S.clips = S.clips.filter(c => !(c.type === 'procedural' && c.starter));
+  return w;
+}
+
+function getNextInsert() {
+  let t = 0;
+  for (const c of S.clips) {
+    if (c.type === 'text' || c.type === 'audio' || c.type === 'overlay-img') continue;
+    t = Math.max(t, c.end);
+  }
+  return t;
+}
+
+function totalDur() {
+  let d = 0;
+  for (const c of S.clips) {
+    if (Number.isFinite(c.end)) d = Math.max(d, c.end);
+  }
+  return Math.max(1, d);
+}
+
+function selected() { return S.clips.find(c => c.id === S.selId) || null; }
+
+/* ---------------- IndexedDB persistence ---------------- */
+const DB_NAME = 'kriticut-db';
+const DB_STORE = 'kv';
+let dbPromise = null;
+
+function dbOpen() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) { reject(new Error('IndexedDB unavailable')); return; }
+    let req;
+    try { req = indexedDB.open(DB_NAME, 1); } catch (e) { reject(e); return; }
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('IndexedDB error'));
+    req.onblocked = () => reject(new Error('IndexedDB blocked'));
+  }).catch(err => { dbPromise = null; throw err; });
+  return dbPromise;
+}
+
+async function dbGet(key) {
+  const db = await dbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readonly');
+    const req = tx.objectStore(DB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function dbPut(key, value) {
+  const db = await dbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readwrite');
+    tx.objectStore(DB_STORE).put(value, key);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Storage write aborted'));
+  });
+}
+async function dbDel(key) {
+  const db = await dbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readwrite');
+    tx.objectStore(DB_STORE).delete(key);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function dbKeys() {
+  const db = await dbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readonly');
+    const req = tx.objectStore(DB_STORE).getAllKeys();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function warnStorage(err) {
+  console.warn('KritiCut storage:', err);
+  if (S._storageWarned) return;
+  S._storageWarned = true;
+  toast('Device storage is full — drafts/videos may not be saved');
+}
+
+async function storeMediaBlob(id, blob) {
+  try {
+    await dbPut('media:' + id, blob);
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  } catch (e) {
+    warnStorage(e);
+  }
+}
+
+async function deleteMediaBlob(id) {
+  try { await dbDel('media:' + id); } catch (e) {}
+}
+
+async function cleanupOrphanMedia(keepKeys) {
+  try {
+    const keys = await dbKeys();
+    for (const k of keys) {
+      if (S._importing) return;
+      if (typeof k === 'string' && k.startsWith('media:') && !keepKeys.has(k)) await dbDel(k);
+    }
+  } catch (e) {}
+}
+
+function markDirty() {
+  if (S._restoring) return;
+  clearTimeout(S._dirtyT);
+  S._dirtyT = setTimeout(() => queueSave(), 700);
+}
+
+function queueSave() {
+  const snapshot = {
+    v: 2,
+    savedAt: Date.now(),
+    name: S.projectName,
+    aspect: S.aspect,
+    zoom: S.zoom,
+    playhead: S.playhead,
+    clips: S.clips.map(serializeClip),
+    media: S.mediaLib.map(m => ({ id: m.id, name: m.name, type: m.type, duration: m.duration }))
+  };
+  S._saveChain = S._saveChain.then(async () => {
+    try {
+      await dbPut('draft', snapshot);
+    } catch (e) {
+      warnStorage(e);
+    }
+  }).catch(e => console.warn(e));
+  return S._saveChain;
+}
+
+function saveDraft() {
+  if (S._restoring) return Promise.resolve();
+  return queueSave();
+}
+
+async function openDraft() {
+  if (S._openingDraft) return;
+  S._openingDraft = true;
+  showLoading('Opening draft…');
+  try {
+    await S._saveChain.catch(() => {});
+    const draft = await dbGet('draft');
+    if (!draft) { toast('No saved draft yet'); return; }
+    S._restoring = true;
+    resetEditor({ name: draft.name || 'My Project', aspect: draft.aspect || '9:16' });
+    S.zoom = clamp(Number(draft.zoom) || 1, 0.2, 12);
+    S.pxPerSec = 60 * S.zoom;
+
+    const media = Array.isArray(draft.media) ? draft.media : [];
+    let restored = 0;
+    await Promise.all(media.map(async meta => {
+      try {
+        const blob = await dbGet('media:' + meta.id);
+        if (!blob) return;
+        const entry = await restoreMediaEntry(meta, blob);
+        if (entry) restored++;
+      } catch (e) { console.warn('Could not restore media', meta && meta.name, e); }
+    }));
+
+    const known = new Set(S.mediaLib.map(m => m.id));
+    let dropped = 0;
+    S.clips = (Array.isArray(draft.clips) ? draft.clips : []).map(c => installClip({ ...c })).filter(c => {
+      if (c.mediaId && !known.has(c.mediaId)) { dropped++; return false; }
+      return Number.isFinite(c.start) && Number.isFinite(c.end) && c.end > c.start;
+    });
+    const starter = S.clips.find(c => c.starter && c.type === 'procedural');
+    const hasVisual = S.clips.some(c => c.type === 'video' || c.type === 'image' || c.type === 'overlay-img');
+    S._welcomeId = starter && !hasVisual ? starter.id : null;
+    S.playhead = clamp(Number(draft.playhead) || 0, 0, totalDur());
+    S.selId = null;
+    S._welcomeId = null;
+    S.history = [];
+    S.historyIdx = -1;
+    S._restoring = false;
+    saveHistory();
+    showEditor();
+    if (dropped) toast(`Draft opened — ${dropped} clip(s) skipped (media missing)`);
+    else toast(`Draft opened — ${restored} media item(s) restored`);
+  } catch (e) {
+    console.error(e);
+    toast('Could not open the draft');
+  } finally {
+    S._restoring = false;
+    S._openingDraft = false;
+    hideLoading();
+  }
+}
+
+function makeMediaElement(type, src) {
+  let el;
+  if (type === 'video') {
+    el = document.createElement('video');
+    el.muted = true;
+    el.playsInline = true;
+    el.setAttribute('playsinline', '');
+    el.setAttribute('webkit-playsinline', '');
+    el.preload = 'auto';
+    el.crossOrigin = 'anonymous';
+  } else if (type === 'audio') {
+    el = document.createElement('audio');
+    el.preload = 'auto';
+  } else {
+    el = new Image();
+    el.decoding = 'async';
+  }
+  el.src = src;
+  return el;
+}
+
+function whenMediaReady(el, type, timeout = 10000) {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = ok => { if (done) return; done = true; resolve(ok); };
+    el.addEventListener('loadedmetadata', () => finish(true), { once: true });
+    el.addEventListener('loadeddata', () => finish(true), { once: true });
+    el.addEventListener('canplay', () => finish(true), { once: true });
+    el.addEventListener('error', () => finish(false), { once: true });
+    if (type === 'image') {
+      if (el.complete && el.naturalWidth > 0) finish(true);
+      else {
+        el.addEventListener('load', () => finish(true), { once: true });
+        el.addEventListener('error', () => finish(false), { once: true });
+      }
+    }
+    if (type !== 'image' && el.readyState > 0) finish(true);
+    setTimeout(() => finish(type === 'image' ? el.complete && el.naturalWidth > 0 : el.readyState > 0), timeout);
+  });
+}
+
+async function restoreMediaEntry(meta, blob) {
+  if (!meta || !blob) return null;
+  const type = meta.type === 'image' || meta.type === 'audio' ? meta.type : 'video';
+  const src = URL.createObjectURL(blob);
+  const el = makeMediaElement(type, src);
+  const ok = await whenMediaReady(el, type, 8000);
+  if (!ok) { try { URL.revokeObjectURL(src); } catch (e) {} return null; }
+  const duration = type === 'image' ? 5 : clamp(Number(el.duration) || Number(meta.duration) || 5, 0.2, 24 * 3600);
+  const entry = {
+    id: meta.id, type: meta.type, name: meta.name || 'Media', src,
+    duration, mediaDur: duration, blob,
+    thumb: type === 'image' ? src : ''
+  };
+  S.mediaLib.push(entry);
+  if (type === 'video') S.videoEls.set(entry.id, el);
+  else if (type === 'image') S.imageEls.set(entry.id, el);
+  else S.audioEls.set(entry.id, el);
+  if (type === 'video') setTimeout(() => makeVideoThumb(el, entry), 250);
+  renderLib();
+  return entry;
+}
+
+/* ---------------- loading overlay ---------------- */
+function showLoading(msg) {
+  $('#loadMsg').textContent = msg || 'Loading…';
+  $('#loading').classList.remove('hidden');
+}
+function hideLoading() { $('#loading').classList.add('hidden'); }
+
+/* ---------------- modal plumbing ---------------- */
+function setupModals() {
+  $$('.modal').forEach(m => {
+    m.addEventListener('click', e => { if (e.target === m) closeModal(m); });
+  });
+  $$('.close-btn').forEach(b => {
+    b.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeModal(b.closest('.modal'));
+    });
+  });
+}
+
+function closeModal(modal) {
+  if (!modal) return;
+  if (modal.id === 'exportModal' && S.exportActive) { toast('Export is still running'); return; }
+  if (modal.id === 'textModal') { hideTextModal(); return; }
+  modal.classList.add('hidden');
+}
+
+function openImport() {
+  pause();
+  delete $('#importImage').dataset.overlay;
+  renderLib();
+  $('#importModal').classList.remove('hidden');
+}
+
+/* ---------------- editor chrome ---------------- */
+function setupEditorChrome() {
+  $('#btnHome').addEventListener('click', showHome);
+  $('#btnPreset').addEventListener('click', openPresetModal);
+  $('#btnAdd').addEventListener('click', openImport);
   $('#btnSplit').addEventListener('click', splitAtPlayhead);
   $('#btnDelete').addEventListener('click', deleteSelected);
   $('#btnDuplicate').addEventListener('click', duplicateSelected);
   $('#btnKeyframe').addEventListener('click', addKeyframeAtPlayhead);
+
+  const nameEl = $('#projectName');
+  const commitName = () => {
+    const name = (nameEl.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60) || 'My Project';
+    if (nameEl.textContent !== name) nameEl.textContent = name;
+    if (name !== S.projectName) {
+      S.projectName = name;
+      markDirty();
+    }
+  };
+  nameEl.addEventListener('blur', commitName);
+  nameEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); }
+  });
+  nameEl.addEventListener('input', () => {
+    if (nameEl.textContent.length > 60) nameEl.textContent = nameEl.textContent.slice(0, 60);
+  });
+  nameEl.addEventListener('paste', e => {
+    e.preventDefault();
+    const text = ((e.clipboardData || window.clipboardData) || {}).getData
+      ? (e.clipboardData || window.clipboardData).getData('text/plain')
+      : '';
+    document.execCommand('insertText', false, String(text || '').slice(0, 60));
+  });
+
+  $('#aspectSelect').addEventListener('change', e => setAspect(e.target.value));
 }
 
-// ============================================================
-// Canvas sizing & render loop
-// ============================================================
+function setAspect(aspect) {
+  if (!ASPECTS[aspect]) aspect = '9:16';
+  S.aspect = aspect;
+  $('#aspectSelect').value = aspect;
+  resizeCanvas();
+  renderTimeline();
+  updatePlayheadUI();
+  markDirty();
+}
+
+/* ---------------- canvas sizing + render loop ---------------- */
 function setupCanvas() {
   requestAnimationFrame(function tick(now) {
-    if (S.playing) {
-      S.playhead = S.playStart + (now - S.playWall)/1000;
-      const d = totalDur();
-      if (S.playhead >= d) { S.playhead = d; pause(); }
-      driveVideos();
-      updatePlayheadUI();
+    try {
+      if (S.exporting) {
+        updateExportProgress(now);
+      } else if (S.playing) {
+        S.playhead = S.playStart + (now - S.playWall) / 1000;
+        const d = totalDur();
+        if (S.playhead >= d) {
+          S.playhead = d;
+          pause();
+        } else {
+          syncMediaPlayback(S.playhead);
+          updatePlayheadUI();
+        }
+      }
+      render();
+    } catch (e) {
+      console.error('KritiCut render error:', e);
     }
-    render();
     requestAnimationFrame(tick);
   });
+
+  if (window.ResizeObserver) {
+    let queued = false;
+    const ro = new ResizeObserver(() => {
+      if (queued || S.exporting) return;
+      queued = true;
+      requestAnimationFrame(() => {
+        queued = false;
+        if (!editorScreen.classList.contains('hidden')) resizeCanvas();
+      });
+    });
+    ro.observe($('#previewWrap'));
+  }
+  window.addEventListener('resize', () => { if (!S.exporting) resizeCanvas(); });
 }
+
 function resizeCanvas() {
+  if (S.exporting) return;
+  if (editorScreen.classList.contains('hidden')) return;
   const wrap = $('#previewWrap');
   const r = wrap.getBoundingClientRect();
-  const ratio = Math.min(r.width/9, r.height/16);
-  const w = 9*ratio*0.92, h = 16*ratio*0.92;
-  canvas.style.width = w+'px'; canvas.style.height = h+'px';
-  const dpr = Math.min(window.devicePixelRatio||1,2);
-  canvas.width = Math.round(w*dpr); canvas.height = Math.round(h*dpr);
-  canvas._w = w; canvas._h = h;
-  overlay.style.width = w+'px'; overlay.style.height = h+'px';
-  overlay.style.left = ((r.width - w)/2)+'px';
-  overlay.style.top = ((r.height - h)/2)+'px';
+  if (!r.width || !r.height) return;
+  const ar = ASPECTS[S.aspect] || 9 / 16;
+  let w = r.width * 0.94;
+  let h = w / ar;
+  if (h > r.height * 0.94) {
+    h = r.height * 0.94;
+    w = h * ar;
+  }
+  w = Math.max(40, Math.round(w));
+  h = Math.max(40, Math.round(h));
+  const dpr = clamp(window.devicePixelRatio || 1, 1, 2);
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.width = Math.max(2, Math.round(w * dpr));
+  canvas.height = Math.max(2, Math.round(h * dpr));
+  canvas._w = w;
+  canvas._h = h;
+  overlay.style.width = w + 'px';
+  overlay.style.height = h + 'px';
+  overlay.style.left = Math.round((r.width - w) / 2) + 'px';
+  overlay.style.top = Math.round((r.height - h) / 2) + 'px';
   render();
 }
-window.addEventListener('resize', resizeCanvas);
 
-function totalDur() { let d=3; for(const c of S.clips) d=Math.max(d,c.end); return d; }
-
-// ============================================================
-// Rendering
-// ============================================================
+/* ---------------- rendering ---------------- */
 function render() {
-  if (!canvas._w) return;
+  if (!canvas.width || !canvas.height) return;
+  if (editorScreen.classList.contains('hidden')) return;
   const W = canvas.width, H = canvas.height;
-  ctx.fillStyle = '#000'; ctx.fillRect(0,0,W,H);
-  const t = S.playhead;
-  const ar = 9/16, ca = W/H;
-  let dw, dh, ox, oy;
-  if (ca > ar) { dh=H; dw=H*ar; ox=(W-dw)/2; oy=0; } else { dw=W; dh=W/ar; ox=0; oy=(H-dh)/2; }
-  ctx.save(); ctx.beginPath(); ctx.rect(ox,oy,dw,dh); ctx.clip();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  if ('filter' in ctx) ctx.filter = 'none';
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
 
-  // Keyframed values interpolation
+  const t = S.playhead;
+  const ar = ASPECTS[S.aspect] || 9 / 16;
+  let dw, dh, ox, oy;
+  if (W / H > ar) { dh = H; dw = H * ar; ox = (W - dw) / 2; oy = 0; }
+  else { dw = W; dh = W / ar; ox = 0; oy = (H - dh) / 2; }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(ox, oy, dw, dh);
+  ctx.clip();
+
   applyKeyframes(t);
 
-  const active = S.clips.filter(c=>c.start<=t && c.end>t).sort((a,b)=>(a.z||0)-(b.z||0));
+  const active = S.clips
+    .filter(c => c.start <= t && c.end > t)
+    .sort((a, b) => (a.z || 0) - (b.z || 0));
+
   for (const c of active) {
-    if (c.type==='video'||c.type==='image'||c.type==='procedural'||c.type==='overlay-img') {
-      drawMediaClip(c,t,ox,oy,dw,dh);
+    if (c.type === 'video' || c.type === 'image' || c.type === 'overlay-img' || c.type === 'procedural') {
+      drawMediaClip(c, t, ox, oy, dw, dh);
     }
   }
-  // Overlays (filter vignette from adjustments)
-  for (const c of active) drawVignette(c,ox,oy,dw,dh);
+  for (const c of active) {
+    if (c.filters && c.filters.vignette) drawVignette(c, ox, oy, dw, dh);
+  }
+  if (S.exporting) {
+    drawTextClipsOnCanvas(t, ox, oy, dw, dh);
+    if (S.exportWM) drawWatermark(ox, oy, dw, dh);
+  }
   ctx.restore();
-  renderTextOverlays(t);
-  drawKeyframeMarkers();
+
+  if (!S.exporting) renderTextOverlays(t);
 }
-function drawMediaClip(c,t,ox,oy,dw,dh) {
-  const lt = (t-c.start)*(c.speed||1)+c.offset;
-  ctx.save();
-  ctx.globalAlpha = c.opacity ?? 1;
-  // filters
-  const f = c.filters||{};
+
+function buildFilterString(f, extraBlur) {
+  if (!f && !extraBlur) return 'none';
   let fs = '';
-  if (f.brightness!=null) fs += `brightness(${f.brightness}) `;
-  if (f.contrast!=null) fs += `contrast(${f.contrast}) `;
-  if (f.saturate!=null) fs += `saturate(${f.saturate}) `;
-  if (f.hueRotate!=null) fs += `hue-rotate(${f.hueRotate}deg) `;
-  if (f.sepia!=null) fs += `sepia(${f.sepia}) `;
-  if (f.grayscale!=null) fs += `grayscale(${f.grayscale}) `;
-  if (f.blurpx!=null) fs += `blur(${f.blurpx}px) `;
-  ctx.filter = fs.trim() || 'none';
+  const n = v => Number.isFinite(+v);
+  if (n(f.brightness)) fs += `brightness(${f.brightness}) `;
+  if (n(f.contrast)) fs += `contrast(${f.contrast}) `;
+  if (n(f.saturate)) fs += `saturate(${f.saturate}) `;
+  if (n(f.hueRotate)) fs += `hue-rotate(${f.hueRotate}deg) `;
+  if (n(f.sepia)) fs += `sepia(${f.sepia}) `;
+  if (n(f.grayscale)) fs += `grayscale(${f.grayscale}) `;
+  const blur = (Number(f.blurpx) || 0) + (extraBlur || 0);
+  if (blur > 0) fs += `blur(${blur}px) `;
+  return fs.trim() || 'none';
+}
 
-  const s = c.scale||1;
-  const rot = ((c.rotation||0)+(c._kf?.rot||0))*Math.PI/180;
-  const px = c._kf?.x ?? (c.x??0.5);
-  const py = c._kf?.y ?? (c.y??0.5);
-  const w = dw*s, h = dh*s;
-  const cx = ox + dw*px, cy = oy + dh*py;
-  ctx.translate(cx,cy); ctx.rotate(rot);
-  if (c.flipX) ctx.scale(-1,1);
+function effectVisual(c, lt) {
+  switch (c.effect) {
+    case 'Shake':
+      return { dx: Math.sin(lt * 47) * 0.006, dy: Math.cos(lt * 39) * 0.006, rot: Math.sin(lt * 31) * 0.035, scale: 1, alpha: 1 };
+    case 'Zoom In':
+      return { dx: 0, dy: 0, rot: 0, scale: 1 + ((lt % 4) / 4) * 0.25, alpha: 1 };
+    case 'Spin':
+      return { dx: 0, dy: 0, rot: (lt % 8) / 8 * Math.PI * 2, scale: 1, alpha: 1 };
+    case 'Flicker':
+      return { dx: 0, dy: 0, rot: 0, scale: 1, alpha: Math.sin(lt * 25) > 0.55 ? 0.55 : 1 };
+    case 'Glitch':
+      return { dx: (lt % 2.3) < 0.07 ? 0.012 : 0, dy: 0, rot: 0, scale: 1, alpha: 1 };
+    case 'VHS':
+      return { dx: Math.sin(lt * 23) * 0.0015, dy: 0, rot: 0, scale: 1, alpha: 1 };
+    default:
+      return { dx: 0, dy: 0, rot: 0, scale: 1, alpha: 1 };
+  }
+}
 
+function drawMediaClip(c, t, ox, oy, dw, dh) {
+  const f = c.filters || {};
+  const kf = c._kf || {};
+  const scale = Number(kf.scale ?? c.scale ?? 1) || 1;
+  const rot = (Number(kf.rot ?? c.rotation ?? 0) || 0) * Math.PI / 180;
+  const px = clamp(Number(kf.x ?? c.x ?? 0.5), 0, 1);
+  const py = clamp(Number(kf.y ?? c.y ?? 0.5), 0, 1);
+  const opacity = clamp(Number(kf.opacity ?? c.opacity ?? 1), 0, 1);
+  const ev = effectVisual(c, Math.max(0, (t - c.start) * (c.speed || 1) + (c.offset || 0)));
+  const w = dw * scale;
+  const h = dh * scale;
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1) return;
+
+  const cx = ox + dw * px + ev.dx * dw;
+  const cy = oy + dh * py + ev.dy * dh;
+
+  ctx.save();
+  ctx.globalAlpha = opacity * ev.alpha;
+  if ('filter' in ctx) ctx.filter = buildFilterString(f, c.effect === 'Blur' ? 5 : 0);
+  ctx.translate(cx, cy);
+  ctx.rotate(rot + (ev.rot || 0));
+  ctx.scale(ev.scale || 1, ev.scale || 1);
+  if (c.flipX) ctx.scale(-1, 1);
+  if (c.flipY) ctx.scale(1, -1);
+
+  let el = null;
   if (c.type === 'procedural') {
-    drawWelcome(c,lt,-w/2,-h/2,w,h);
+    drawWelcome(c, Math.max(0, t - c.start), -w / 2, -h / 2, w, h);
   } else {
-    let el = c.type==='video' ? S.videoEls.get(c.mediaId) : S.imageEls.get(c.mediaId);
+    el = c.type === 'video' ? S.videoEls.get(c.mediaId) : S.imageEls.get(c.mediaId);
     if (!el) { ctx.restore(); return; }
-    if (c.type==='video' && !S.playing) {
-      const want = clamp(lt,0,Math.max(0.05,c.mediaDur-0.05));
-      if (Math.abs(el.currentTime - want) > 0.1) { try{el.currentTime=want;}catch(e){} }
+    const lt = (t - c.start) * (c.speed || 1) + (c.offset || 0);
+    if (c.type === 'video' && !S.playing && !S.exporting) {
+      const want = clamp(lt, 0, Math.max(0.05, (c.mediaDur || 1) - 0.05));
+      if (Math.abs(el.currentTime - want) > 0.08) { try { el.currentTime = want; } catch (e) {} }
     }
-    const vW = el.videoWidth||el.naturalWidth||w, vH = el.videoHeight||el.naturalHeight||h;
-    const a = vW/vH;
-    let w2=w, h2=w/a; if (h2<h){h2=h;w2=h*a;}
-    try{ctx.drawImage(el,-w2/2,-h2/2,w2,h2);}catch(e){}
+    if (c.effect === 'Kaleido') drawKaleido(el, -w / 2, -h / 2, w, h);
+    else drawFit(el, -w / 2, -h / 2, w, h);
   }
-  // overlay color (warmth via color wash)
-  if (f.warmth) {
-    ctx.fillStyle = `rgba(255,170,60,${Math.abs(f.warmth)*0.15})`;
-    ctx.fillRect(-w/2,-h/2,w,h);
-  }
-  if (f.fade) {
-    ctx.fillStyle = `rgba(255,255,255,${f.fade*0.2})`;
-    ctx.fillRect(-w/2,-h/2,w,h);
-  }
-  // clip effect
-  applyClipEffect(c,-w/2,-h/2,w,h,lt);
+
+  if ('filter' in ctx) ctx.filter = 'none';
+  drawWashes(f, w, h, c.overlayColor);
+  drawEffectOverlay(c, Math.max(0, t - c.start), w, h);
   ctx.restore();
 }
-function drawVignette(c,ox,oy,dw,dh) {
-  const v = c.filters?.vignette;
-  if (!v) return;
-  const grd = ctx.createRadialGradient(ox+dw/2,oy+dh/2,Math.min(dw,dh)*(0.4-v*0.1),ox+dw/2,oy+dh/2,Math.max(dw,dh)*(0.6+v*0.2));
-  grd.addColorStop(0,'rgba(0,0,0,0)');
-  grd.addColorStop(1,`rgba(0,0,0,${0.3+v*0.4})`);
-  ctx.fillStyle = grd;
-  ctx.save(); ctx.resetTransform ? ctx.resetTransform() : ctx.setTransform(1,0,0,1,0,0);
-  ctx.fillRect(0,0,canvas.width,canvas.height);
-  ctx.restore();
+
+function drawFit(el, x, y, w, h) {
+  const vW = el.videoWidth || el.naturalWidth || 0;
+  const vH = el.videoHeight || el.naturalHeight || 0;
+  if (!vW || !vH) return;
+  if (el.readyState !== undefined && el.readyState < 2 && el.tagName === 'VIDEO') return;
+  const a = vW / vH;
+  let w2 = w, h2 = w / a;
+  if (h2 < h) { h2 = h; w2 = h * a; }
+  try { ctx.drawImage(el, x + (w - w2) / 2, y + (h - h2) / 2, w2, h2); } catch (e) {}
 }
-function drawWelcome(c,t,x,y,w,h){
-  const hue=(t*25)%360;
-  const g=ctx.createLinearGradient(x,y,x+w,y+h);
-  g.addColorStop(0,`hsl(${hue},75%,55%)`);g.addColorStop(0.5,`hsl(${(hue+60)%360},75%,45%)`);g.addColorStop(1,`hsl(${(hue+140)%360},75%,35%)`);
-  ctx.fillStyle=g;ctx.fillRect(x,y,w,h);
-  for(let i=0;i<10;i++){ctx.fillStyle=`hsla(${(hue+i*30)%360},90%,65%,0.55)`;const bx=x+(Math.sin(t*0.8+i)*0.5+0.5)*w;const by=y+((t*40+i*70)%h);ctx.beginPath();ctx.arc(bx,by,15+Math.sin(t*2+i)*8,0,Math.PI*2);ctx.fill();}
-  ctx.fillStyle='#fff';ctx.textAlign='center';ctx.textBaseline='middle';ctx.shadowColor='rgba(0,0,0,0.5)';ctx.shadowBlur=10;
-  ctx.font=`bold ${Math.round(w*0.08)}px -apple-system,sans-serif`;
-  const L=['Welcome to','KritiCut','Trim · Split · Keyframe','4K Export · Premium Filters','Templates & Presets','All features FREE'];
-  ctx.fillText(L[Math.floor(t/1.8)%L.length],x+w/2,y+h/2);
-  ctx.font=`${Math.round(w*0.04)}px -apple-system,sans-serif`;ctx.fillStyle='rgba(255,255,255,0.85)';
-  ctx.fillText('Tap + to add media · Text tab for animated titles',x+w/2,y+h/2+w*0.09);
-  ctx.shadowBlur=0;
-}
-function applyClipEffect(c,x,y,w,h,lt){
-  switch(c.effect){
-    case 'Vignette':{const g=ctx.createRadialGradient(x+w/2,y+h/2,w*0.35,x+w/2,y+h/2,w*0.75);g.addColorStop(0,'rgba(0,0,0,0)');g.addColorStop(1,'rgba(0,0,0,0.6)');ctx.fillStyle=g;ctx.fillRect(x-50,y-50,w+100,h+100);break;}
-    case 'Shake':ctx.fillStyle='rgba(255,0,80,0.1)';ctx.fillRect(x+(Math.random()-0.5)*8,y+(Math.random()-0.5)*8,w,h);break;
-    case 'VHS':ctx.fillStyle=`rgba(255,255,255,${Math.random()*0.06})`;for(let i=0;i<12;i++){const yy=y+Math.random()*h;ctx.fillRect(x,yy,w,1+Math.random()*2);}break;
-    case 'Zoom In':ctx.strokeStyle='rgba(255,255,255,0.4)';ctx.lineWidth=3;ctx.beginPath();ctx.arc(x+w/2,y+h/2,60+(lt%3)*80,0,Math.PI*2);ctx.stroke();break;
-    case 'Spin':ctx.strokeStyle='rgba(255,255,255,0.2)';ctx.lineWidth=4;for(let i=0;i<4;i++){ctx.save();ctx.translate(x+w/2,y+h/2);ctx.rotate(lt*3+i*Math.PI/2);ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(w*0.4,0);ctx.stroke();ctx.restore();}break;
-    case 'Flicker':ctx.fillStyle=`rgba(255,255,255,${Math.random()>0.9?0.3:0})`;ctx.fillRect(x,y,w,h);break;
-    case 'Blur':ctx.filter='blur(2px) '+(ctx.filter||'');break;
+
+function drawKaleido(el, x, y, w, h) {
+  const parts = [[-1, -1, 1, 1], [1, -1, -1, 1], [-1, 1, 1, -1], [1, 1, -1, -1]];
+  for (const [qx, qy, mx, my] of parts) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(qx < 0 ? x : x + w / 2, qy < 0 ? y : y + h / 2, w / 2, h / 2);
+    ctx.clip();
+    ctx.translate(x + (qx < 0 ? w / 4 : w * 3 / 4), y + (qy < 0 ? h / 4 : h * 3 / 4));
+    ctx.scale(mx, my);
+    drawFit(el, -w / 2, -h / 2, w, h);
+    ctx.restore();
   }
 }
 
-// ============================================================
-// Text overlays
-// ============================================================
-function renderTextOverlays(t){
-  overlay.innerHTML = '';
-  for (const c of S.clips) {
-    if (c.type !== 'text') continue;
-    if (c.start > t || c.end <= t) continue;
-    const div = document.createElement('div');
-    div.className = 'overlay-text' + (S.selId===c.id ? ' selected':'') + (S.playing?'':' draggable');
-    div.dataset.id = c.id;
-    div.textContent = c.text || '';
-    const px = c._kf?.x ?? (c.x??0.5), py = c._kf?.y ?? (c.y??0.4);
-    const sz = c._kf?.size ?? (c.size||38);
-    const rot = c._kf?.rot ?? (c.rotation||0);
-    const op = c._kf?.opacity ?? (c.opacity??1);
-    div.style.left = (px*100)+'%'; div.style.top = (py*100)+'%';
-    div.style.fontSize = sz+'px';
-    div.style.color = c.color||'#fff';
-    div.style.fontFamily = c.fontCss || c.font || 'sans-serif';
-    div.style.opacity = op;
-    div.style.transform = `translate(-50%,-50%) rotate(${rot}deg) scale(${c._kf?.scale??1})`;
-    if (c.bold) div.style.fontWeight='900';
-    if (c.italic) div.style.fontStyle='italic';
-    if (c.underline) div.style.textDecoration='underline';
-    if (c.align) div.style.textAlign = c.align;
-    if (c.strokeW) div.style.webkitTextStroke = `${c.strokeW}px ${c.stroke||'#000'}`;
-    if (c.shadowBlur) div.style.textShadow = `0 0 ${c.shadowBlur}px ${c.shadow||'#000'}, 0 2px 4px rgba(0,0,0,0.6)`;
-    else div.style.textShadow = '0 2px 6px rgba(0,0,0,0.7)';
-    if (c.letterSpacing) div.style.letterSpacing = c.letterSpacing+'px';
-    if (c.bg && c.bg !== '#00000000') { div.style.background = c.bg; div.style.padding = '4px 10px'; div.style.borderRadius = '6px'; }
-    if (c.effectCss) div.style.cssText += c.effectCss;
-    // Animation
-    const lt = t - c.start;
-    const dur = c.duration();
-    const ad = c.animDur || 0.6;
-    if (c.animIn && c.animIn !== 'None' && lt < ad) {
-      div.style.animation = `${animName(c.animIn,'in')} ${ad}s forwards`;
-    } else if (c.animOut && c.animOut !== 'None' && lt > dur - ad) {
-      div.style.animation = `${animName(c.animOut,'out')} ${ad}s forwards`;
-    } else if (c.animLoop && c.animLoop !== 'None') {
-      div.style.animation = `${animName(c.animLoop,'loop')} 1.2s infinite`;
-    }
-    overlay.appendChild(div);
-  }
-  attachOverlayDrag();
+function isColor(v) {
+  return typeof v === 'string' && /^(#[0-9a-f]{3,8}|rgba?\([^)]*\)|hsla?\([^)]*\)|[a-z]+)$/i.test(v.trim());
 }
-function animName(name,dir){
+
+function drawWashes(f, w, h, clipOverlayColor) {
+  const overlayColor = clipOverlayColor || f.overlayColor;
+  if (isColor(overlayColor)) {
+    ctx.save();
+    ctx.fillStyle = overlayColor;
+    ctx.fillRect(-w / 2, -h / 2, w, h);
+    ctx.restore();
+  }
+  const warmth = Number(f.warmth) || 0;
+  if (warmth) {
+    ctx.save();
+    ctx.fillStyle = warmth > 0 ? `rgba(255,170,60,${Math.abs(warmth) * 0.15})` : `rgba(80,150,255,${Math.abs(warmth) * 0.15})`;
+    ctx.fillRect(-w / 2, -h / 2, w, h);
+    ctx.restore();
+  }
+  const tint = Number(f.tint) || 0;
+  if (tint) {
+    ctx.save();
+    ctx.fillStyle = tint > 0 ? `rgba(255,0,120,${Math.abs(tint) * 0.1})` : `rgba(0,255,120,${Math.abs(tint) * 0.1})`;
+    ctx.fillRect(-w / 2, -h / 2, w, h);
+    ctx.restore();
+  }
+  const fade = Number(f.fade) || 0;
+  if (fade) {
+    ctx.save();
+    ctx.fillStyle = `rgba(255,255,255,${clamp(fade, 0, 1) * 0.2})`;
+    ctx.fillRect(-w / 2, -h / 2, w, h);
+    ctx.restore();
+  }
+}
+
+function drawVignetteRect(x, y, w, h, strength) {
+  const s = clamp(strength, 0, 1);
+  const g = ctx.createRadialGradient(x + w / 2, y + h / 2, Math.min(w, h) * (0.45 - s * 0.12), x + w / 2, y + h / 2, Math.max(w, h) * (0.6 + s * 0.25));
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, `rgba(0,0,0,${0.25 + s * 0.5})`);
+  ctx.fillStyle = g;
+  ctx.fillRect(x, y, w, h);
+}
+
+function drawVignette(c, ox, oy, dw, dh) {
+  const v = clamp(Number(c.filters && c.filters.vignette) || 0, 0, 1);
+  if (!v) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(ox, oy, dw, dh);
+  ctx.clip();
+  const g = ctx.createRadialGradient(ox + dw / 2, oy + dh / 2, Math.min(dw, dh) * (0.45 - v * 0.12), ox + dw / 2, oy + dh / 2, Math.max(dw, dh) * (0.6 + v * 0.25));
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, `rgba(0,0,0,${0.25 + v * 0.5})`);
+  ctx.fillStyle = g;
+  ctx.fillRect(ox, oy, dw, dh);
+  ctx.restore();
+}
+
+function drawEffectOverlay(c, lt, w, h) {
+  switch (c.effect) {
+    case 'VHS': {
+      ctx.save();
+      ctx.fillStyle = 'rgba(255,255,255,0.05)';
+      for (let i = 0; i < 14; i++) {
+        const y = -h / 2 + ((i * 37 + lt * 60) % h);
+        ctx.fillRect(-w / 2, y, w, 1 + (i % 2));
+      }
+      ctx.fillStyle = 'rgba(0,180,255,0.05)';
+      ctx.fillRect(-w / 2, -h / 2, w * 0.35, h);
+      ctx.fillStyle = 'rgba(255,0,120,0.04)';
+      ctx.fillRect(w / 2 - w * 0.35, -h / 2, w * 0.35, h);
+      ctx.restore();
+      break;
+    }
+    case 'Glitch': {
+      if ((lt % 2.3) < 0.09) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        for (let i = 0; i < 4; i++) {
+          const y = -h / 2 + ((i * 97 + lt * 500) % h);
+          const bh = 4 + (i % 3) * 5;
+          ctx.fillStyle = i % 2 ? 'rgba(255,0,128,0.22)' : 'rgba(0,255,255,0.22)';
+          ctx.fillRect(-w / 2, y, w, bh);
+        }
+        ctx.restore();
+      }
+      break;
+    }
+    case 'Vignette': {
+      drawVignetteRect(-w / 2, -h / 2, w, h, 0.55);
+      break;
+    }
+    default: break;
+  }
+}
+
+function drawWelcome(c, t, x, y, w, h) {
+  const hue = (t * 25) % 360;
+  const g = ctx.createLinearGradient(x, y, x + w, y + h);
+  g.addColorStop(0, `hsl(${hue},75%,55%)`);
+  g.addColorStop(0.5, `hsl(${(hue + 60) % 360},75%,45%)`);
+  g.addColorStop(1, `hsl(${(hue + 140) % 360},75%,35%)`);
+  ctx.fillStyle = g;
+  ctx.fillRect(x, y, w, h);
+  for (let i = 0; i < 10; i++) {
+    ctx.fillStyle = `hsla(${(hue + i * 30) % 360},90%,65%,0.55)`;
+    const bx = x + (Math.sin(t * 0.8 + i) * 0.5 + 0.5) * w;
+    const by = y + ((t * 40 + i * 70) % h);
+    ctx.beginPath();
+    ctx.arc(bx, by, 15 + Math.sin(t * 2 + i) * 8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.save();
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0,0,0,0.5)';
+  ctx.shadowBlur = 10;
+  const lines = ['Welcome to', 'KritiCut', 'Trim · Split · Keyframe', '4K Export · Filters', 'Templates & Presets', 'All features FREE'];
+  ctx.font = `bold ${Math.round(w * 0.08)}px -apple-system,sans-serif`;
+  ctx.fillText(lines[Math.floor(t / 1.8) % lines.length], x + w / 2, y + h / 2);
+  ctx.font = `${Math.round(w * 0.035)}px -apple-system,sans-serif`;
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillText('Tap Import to add media · Text tab for titles', x + w / 2, y + h / 2 + w * 0.09);
+  ctx.restore();
+}
+
+function drawWatermark(ox, oy, dw, dh) {
+  ctx.save();
+  const size = Math.max(14, Math.round(dw * 0.028));
+  ctx.font = `bold ${size}px -apple-system,sans-serif`;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.shadowColor = 'rgba(0,0,0,0.5)';
+  ctx.shadowBlur = 6;
+  ctx.fillText('KritiCut', ox + dw - size, oy + dh - size * 0.7);
+  ctx.restore();
+}
+
+/* ---------------- text on the live preview (DOM) ---------------- */
+const SAFE_EFFECT_PROPS = new Set([
+  'text-shadow', 'color', '-webkit-text-stroke', '-webkit-text-stroke-color', '-webkit-text-stroke-width',
+  'background', 'background-image', '-webkit-background-clip', 'background-clip', '-webkit-text-fill-color',
+  'filter', 'opacity', '-webkit-box-reflect'
+]);
+
+function safeEffectStyle(css) {
+  const out = {};
+  if (!css || typeof css !== 'string') return out;
+  for (const decl of css.split(';')) {
+    const i = decl.indexOf(':');
+    if (i < 0) continue;
+    const prop = decl.slice(0, i).trim().toLowerCase();
+    const val = decl.slice(i + 1).trim();
+    if (!val || !SAFE_EFFECT_PROPS.has(prop)) continue;
+    if (/url\s*\(|expression|javascript:/i.test(val)) continue;
+    if (!(prop in out)) out[prop] = val;
+  }
+  return out;
+}
+
+function setStyles(el, styles) {
+  for (const k in styles) {
+    if (styles[k] == null || styles[k] === '') el.style.removeProperty(k);
+    else el.style.setProperty(k, String(styles[k]));
+  }
+}
+
+function bubbleStyle(bubble) {
+  switch (bubble) {
+    case 'Rectangle': return { background: 'rgba(0,0,0,0.65)', padding: '6px 12px', 'border-radius': '2px' };
+    case 'Rounded': return { background: 'rgba(0,0,0,0.65)', padding: '6px 14px', 'border-radius': '14px' };
+    case 'Pill': return { background: 'rgba(0,0,0,0.65)', padding: '6px 20px', 'border-radius': '999px' };
+    case 'Cloud': return { background: '#fff', color: '#111', padding: '10px 18px', 'border-radius': '50% / 42%' };
+    case 'Arrow Down': return { background: '#fff', color: '#111', padding: '6px 14px 18px', 'clip-path': 'polygon(0 0,100% 0,100% 78%,50% 100%,0 78%)' };
+    case 'Arrow Up': return { background: '#fff', color: '#111', padding: '18px 14px 6px', 'clip-path': 'polygon(0 22%,50% 0,100% 22%,100% 100%,0 100%)' };
+    case 'Quote': return { 'border-left': '4px solid rgba(255,255,255,0.85)', padding: '2px 0 2px 12px', 'font-style': 'italic', 'text-align': 'left' };
+    case 'Callout': return { background: '#fff', color: '#111', padding: '8px 14px', 'border-radius': '14px' };
+    case 'Sticker': return { background: '#fff', color: '#111', padding: '8px 14px', 'border-radius': '10px', 'box-shadow': '0 5px 14px rgba(0,0,0,0.45)' };
+    case 'Neon Box': return { border: '2px solid currentColor', padding: '6px 14px', 'border-radius': '10px', 'box-shadow': '0 0 12px currentColor' };
+    default: return {};
+  }
+}
+
+function applyTextStyles(el, c, preview) {
+  const text = preview ? (c.text || 'Your text') : (c.text || '');
+  if (el.textContent !== text) el.textContent = text;
+  const size = preview ? clamp(Number(c.size) || 38, 12, 46) : (Number(c.size) || 38);
+  el.style.fontFamily = c.fontCss || 'sans-serif';
+  el.style.fontSize = size + 'px';
+  el.style.fontWeight = c.bold === false ? '500' : '800';
+  el.style.fontStyle = c.italic ? 'italic' : 'normal';
+  el.style.textDecoration = c.underline ? 'underline' : 'none';
+  el.style.color = c.color || '#ffffff';
+  el.style.textAlign = c.align || 'center';
+  el.style.letterSpacing = (Number(c.letterSpacing) || 0) + 'px';
+  el.style.lineHeight = String(Number(c.lineHeight) || 1.2);
+  el.style.textShadow = Number(c.shadowBlur) > 0
+    ? `0 0 ${Number(c.shadowBlur)}px ${c.shadow || '#000'}, 0 2px 6px rgba(0,0,0,0.6)`
+    : '0 2px 6px rgba(0,0,0,0.7)';
+  el.style.webkitTextStroke = Number(c.strokeW) > 0 ? `${Number(c.strokeW)}px ${c.stroke || '#000'}` : '';
+
+  setStyles(el, {
+    background: '', 'background-image': '', '-webkit-background-clip': '', 'background-clip': '',
+    '-webkit-text-fill-color': '', filter: '', padding: '', 'border-radius': '', border: '',
+    'box-shadow': '', 'clip-path': '', '-webkit-box-reflect': ''
+  });
+
+  setStyles(el, bubbleStyle(c.bubble));
+  if (isColor(c.bg)) el.style.background = c.bg;
+  else if (c.bg) el.style.removeProperty('background');
+  setStyles(el, safeEffectStyle(c.effectCss));
+}
+
+function animName(name) {
   const map = {
-    'Fade In':'kc-fadein','Fade Out':'kc-fadeout',
-    'Pop In':'kc-popin','Pop Out':'kc-popout',
-    'Slide Up':'kc-slideup','Slide Up Out':'kc-slideupout',
-    'Slide Down':'kc-slidedown','Slide Down Out':'kc-slidedownout',
-    'Slide Left':'kc-slideleft','Slide Left Out':'kc-slideleftout',
-    'Slide Right':'kc-slideright','Slide Right Out':'kc-sliderightout',
-    'Scale In':'kc-scalein','Scale Out':'kc-scaleout',
-    'Blur In':'kc-blurin','Blur Out':'kc-blurout',
-    'Spin In':'kc-spinin',
-    'Typewriter':'kc-typewriter',
-    'Pulse':'kc-pulse','Bounce':'kc-bounce','Wave':'kc-wave','Shake':'kc-shake',
-    'Glow':'kc-glow','Rainbow':'kc-rainbow','Neon Flicker':'kc-flicker','Blink':'kc-flicker'
+    'Fade In': 'kc-fadein', 'Fade Out': 'kc-fadeout',
+    'Pop In': 'kc-popin', 'Pop Out': 'kc-popout',
+    'Slide Up': 'kc-slideup', 'Slide Up Out': 'kc-slideupout',
+    'Slide Down': 'kc-slidedown', 'Slide Down Out': 'kc-slidedownout',
+    'Slide Left': 'kc-slideleft', 'Slide Left Out': 'kc-slideleftout',
+    'Slide Right': 'kc-slideright', 'Slide Right Out': 'kc-sliderightout',
+    'Scale In': 'kc-scalein', 'Scale Out': 'kc-scaleout',
+    'Blur In': 'kc-blurin', 'Blur Out': 'kc-blurout',
+    'Spin In': 'kc-spinin', 'Typewriter': 'kc-typewriter',
+    'Pulse': 'kc-pulse', 'Bounce': 'kc-bounce', 'Wave': 'kc-wave', 'Shake': 'kc-shake',
+    'Glow': 'kc-glow', 'Rainbow': 'kc-rainbow', 'Neon Flicker': 'kc-flicker', 'Blink': 'kc-blink'
   };
   return map[name] || 'kc-fadein';
 }
 
-// Draggable text on overlay
+function renderTextOverlays(t) {
+  const seen = new Set();
+  for (const c of S.clips) {
+    if (c.type !== 'text') continue;
+    if (c.start > t || c.end <= t) continue;
+    seen.add(c.id);
+    let el = S.textEls.get(c.id);
+    if (!el) {
+      el = document.createElement('div');
+      el.dataset.id = c.id;
+      overlay.appendChild(el);
+      S.textEls.set(c.id, el);
+    }
+    let inner = el.firstElementChild;
+    if (!inner || !inner.classList.contains('kc-text-inner')) {
+      el.textContent = '';
+      inner = document.createElement('span');
+      inner.className = 'kc-text-inner';
+      el.appendChild(inner);
+    }
+    const styleSig = [c.text, c.fontCss, c.color, c.stroke, c.strokeW, c.shadow, c.shadowBlur,
+      c.letterSpacing, c.lineHeight, c.bold, c.italic, c.underline, c.align, c.bg, c.bubble, c.effectCss].join('|');
+    if (inner.dataset.sig !== styleSig) {
+      applyTextStyles(inner, c, false);
+      inner.dataset.sig = styleSig;
+    }
+
+    const editable = !S.playing && !S.exporting;
+    const cls = 'overlay-text' + (S.selId === c.id ? ' selected' : '') + (editable ? ' draggable' : '');
+    if (el.className !== cls) el.className = cls;
+
+    const kf = c._kf || {};
+    const px = clamp(Number(kf.x ?? c.x ?? 0.5), 0, 1);
+    const py = clamp(Number(kf.y ?? c.y ?? 0.35), 0, 1);
+    const size = Number(kf.size ?? c.size ?? 38);
+    const rot = Number(kf.rot ?? c.rotation ?? 0);
+    const op = clamp(Number(kf.opacity ?? c.opacity ?? 1), 0, 1);
+    el.style.left = (px * 100) + '%';
+    el.style.top = (py * 100) + '%';
+    el.style.fontSize = size + 'px';
+    inner.style.fontSize = size + 'px';
+    el.style.opacity = String(op);
+    el.style.transform = `translate(-50%,-50%) rotate(${rot}deg) scale(${Number(kf.scale ?? 1) || 1})`;
+
+    const lt = t - c.start;
+    const dur = c.duration();
+    const ad = clamp(Number(c.animDur) || 0.6, 0.2, 5);
+    let anim = '';
+    if (c.animIn && c.animIn !== 'None' && lt < ad) anim = `${animName(c.animIn)} ${ad}s both`;
+    else if (c.animOut && c.animOut !== 'None' && lt > dur - ad) anim = `${animName(c.animOut)} ${ad}s both`;
+    else if (c.animLoop && c.animLoop !== 'None') anim = `${animName(c.animLoop)} 1.2s infinite`;
+    if (inner.dataset.anim !== anim) {
+      inner.style.animation = anim;
+      inner.dataset.anim = anim;
+    }
+    if (anim && typeof inner.getAnimations === 'function') {
+      for (const a of inner.getAnimations()) {
+        try { a.currentTime = Math.max(0, lt * 1000); } catch (e) {}
+      }
+    }
+  }
+  for (const [id, el] of [...S.textEls.entries()]) {
+    if (!seen.has(id)) { el.remove(); S.textEls.delete(id); }
+  }
+}
+
 let dragState = null;
-function attachOverlayDrag(){
+function attachOverlayDrag() {
   if (S._dragBound) return;
   S._dragBound = true;
-  const getP = e => e.touches ? e.touches[0] : e;
-  overlay.addEventListener('mousedown', startD);
-  overlay.addEventListener('touchstart', startD, {passive:false});
-  function startD(e){
+  const getP = e => (e.touches && e.touches[0]) || e;
+  overlay.addEventListener('mousedown', startDrag);
+  overlay.addEventListener('touchstart', startDrag, { passive: false });
+
+  function startDrag(e) {
+    if (S.playing || S.exporting) return;
     const div = e.target.closest('.overlay-text');
     if (!div) return;
     if (e.cancelable) e.preventDefault();
-    e.stopPropagation();
-    const id = div.dataset.id;
-    const clip = S.clips.find(c=>c.id===id); if(!clip) return;
-    select(id);
+    const clip = S.clips.find(c => c.id === div.dataset.id);
+    if (!clip) return;
+    select(clip.id);
     const p = getP(e);
     const r = overlay.getBoundingClientRect();
-    dragState = {clip, sx:p.x, sy:p.y, ox:clip.x??0.5, oy:clip.y??0.5, r};
-    document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
-    document.addEventListener('touchmove', mv, {passive:false}); document.addEventListener('touchend', up);
+    dragState = { clip, sx: p.clientX, sy: p.clientY, ox: Number(clip.x ?? 0.5), oy: Number(clip.y ?? 0.35), r, moved: false };
+    document.addEventListener('mousemove', moveDrag);
+    document.addEventListener('mouseup', endDrag);
+    document.addEventListener('touchmove', moveDrag, { passive: false });
+    document.addEventListener('touchend', endDrag);
   }
-  function mv(e){
-    if(!dragState) return;
-    if(e.cancelable) e.preventDefault();
-    const p=getP(e);
-    dragState.clip.x = clamp(dragState.ox + (p.x-dragState.sx)/dragState.r.width, 0,1);
-    dragState.clip.y = clamp(dragState.oy + (p.y-dragState.sy)/dragState.r.height, 0,1);
+  function moveDrag(e) {
+    if (!dragState) return;
+    if (e.cancelable) e.preventDefault();
+    const p = getP(e);
+    if (!dragState.moved) {
+      if (Math.abs(p.clientX - dragState.sx) <= 2 && Math.abs(p.clientY - dragState.sy) <= 2) return;
+      dragState.moved = true;
+    }
+    dragState.clip.x = clamp(dragState.ox + (p.clientX - dragState.sx) / Math.max(1, dragState.r.width), 0, 1);
+    dragState.clip.y = clamp(dragState.oy + (p.clientY - dragState.sy) / Math.max(1, dragState.r.height), 0, 1);
     render();
   }
-  function up(){
-    document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);
-    document.removeEventListener('touchmove',mv);document.removeEventListener('touchend',up);
-    if(dragState){saveHistory();dragState=null;}
+  function endDrag() {
+    document.removeEventListener('mousemove', moveDrag);
+    document.removeEventListener('mouseup', endDrag);
+    document.removeEventListener('touchmove', moveDrag);
+    document.removeEventListener('touchend', endDrag);
+    if (dragState) {
+      const moved = dragState.moved;
+      dragState = null;
+      if (moved) saveHistory();
+    }
   }
 }
 
-// ============================================================
-// Playback / transport
-// ============================================================
-function setupTransport(){
+/* ---------------- playback + audio graph ---------------- */
+function setupTransport() {
   $('#btnPlay').addEventListener('click', togglePlay);
   $('#bigPlay').addEventListener('click', togglePlay);
-  $('#btnPrevFrame').addEventListener('click', ()=>{pause();S.playhead=Math.max(0,S.playhead-1/30);updatePlayheadUI();render();});
-  $('#btnNextFrame').addEventListener('click', ()=>{pause();S.playhead=Math.min(totalDur(),S.playhead+1/30);updatePlayheadUI();render();});
+  $('#btnPrevFrame').addEventListener('click', () => {
+    pause();
+    S.playhead = Math.max(0, S.playhead - 1 / 30);
+    updatePlayheadUI();
+    render();
+  });
+  $('#btnNextFrame').addEventListener('click', () => {
+    pause();
+    S.playhead = Math.min(totalDur(), S.playhead + 1 / 30);
+    updatePlayheadUI();
+    render();
+  });
 }
-function togglePlay(){ S.playing ? pause() : play(); }
-function play(){
-  if (S.playhead >= totalDur()-0.05) S.playhead = 0;
-  initAudio();
+
+function togglePlay() { S.playing ? pause() : play(); }
+
+function ensureAudio() {
+  if (S.audioCtx) {
+    if (S.audioCtx.state === 'suspended') S.audioCtx.resume().catch(() => {});
+    return true;
+  }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return false;
+  try {
+    S.audioCtx = new AC();
+    S.master = S.audioCtx.createGain();
+    S.master.gain.value = 1;
+    S.master.connect(S.audioCtx.destination);
+    return true;
+  } catch (e) {
+    console.warn('Audio unavailable', e);
+    return false;
+  }
+}
+
+function primeMediaForPlayback() {
+  if (!S.audioCtx) return;
+  const activeMedia = new Set(S.clips.filter(c => c.start <= S.playhead && c.end > S.playhead).map(c => c.mediaId));
+  for (const [mid, el] of [...S.videoEls, ...S.audioEls]) {
+    if (activeMedia.has(mid) || S.primed.has(el)) continue;
+    S.primed.add(el);
+    try {
+      el.muted = true;
+      const p = el.play();
+      Promise.resolve(p).then(() => {
+        try { el.pause(); el.currentTime = 0; } catch (e) {}
+        el.muted = false;
+      }).catch(() => { el.muted = false; });
+    } catch (e) { el.muted = false; }
+  }
+}
+
+function play() {
+  if (S.exporting) return;
+  if (!S.clips.length) { toast('Add media to the timeline first'); return; }
+  if (S.playhead >= totalDur() - 0.03) S.playhead = 0;
+  ensureAudio();
   S.playing = true;
   S.playWall = performance.now();
   S.playStart = S.playhead;
-  startAudio();
-  for (const c of S.clips) {
-    if (c.type !== 'video') continue;
-    const el = S.videoEls.get(c.mediaId); if(!el) continue;
-    if (c.start<=S.playhead && c.end>S.playhead) {
-      const lt = clamp((S.playhead-c.start)*(c.speed||1)+c.offset, 0, Math.max(0.05,c.mediaDur-0.05));
-      try{el.currentTime=lt;el.playbackRate=c.speed||1;el.play().catch(()=>{});}catch(e){}
-    }
-  }
+  primeMediaForPlayback();
+  syncMediaPlayback(S.playhead);
   $('#playIcon').innerHTML = '<path fill="currentColor" d="M6 4h4v16H6zm8 0h4v16h-4z"/>';
   $('#bigPlay').classList.add('hidden');
 }
-function pause(){ stopPlayback(); $('#playIcon').innerHTML = '<path fill="currentColor" d="M8 5v14l11-7z"/>'; $('#bigPlay').classList.remove('hidden'); render(); }
-function stopPlayback(){ S.playing=false; stopAudio(); for(const el of S.videoEls.values()){try{el.pause();}catch(e){}} }
-function driveVideos(){
-  const t = S.playhead;
-  for (const c of S.clips) {
-    if (c.type !== 'video') continue;
-    const el = S.videoEls.get(c.mediaId); if(!el) continue;
-    if (c.start<=t && c.end>t) {
-      const lt = clamp((t-c.start)*(c.speed||1)+c.offset, 0, Math.max(0.05,c.mediaDur-0.05));
-      el.playbackRate = c.speed||1;
-      if (el.paused) { try{el.currentTime=lt;el.play().catch(()=>{});}catch(e){} }
-      else if (Math.abs(el.currentTime-lt)>0.2) { try{el.currentTime=lt;}catch(e){} }
-    } else {
-      if (!el.paused) try{el.pause();}catch(e){}
+
+function pause() {
+  stopPlayback();
+  $('#playIcon').innerHTML = '<path fill="currentColor" d="M8 5v14l11-7z"/>';
+  $('#bigPlay').classList.remove('hidden');
+  render();
+}
+
+function stopPlayback() {
+  S.playing = false;
+  for (const id of [...S.activeAudio.keys()]) stopClipAudio(id);
+  for (const el of [...S.videoEls.values(), ...S.audioEls.values()]) {
+    try { el.pause(); } catch (e) {}
+  }
+  if (S.master && !S.exporting) { try { S.master.gain.value = 1; } catch (e) {} }
+  if (!$('#playIcon')) return;
+  $('#playIcon').innerHTML = '<path fill="currentColor" d="M8 5v14l11-7z"/>';
+  $('#bigPlay').classList.remove('hidden');
+}
+
+function mediaElementForClip(c) {
+  if (c.type === 'video') return S.videoEls.get(c.mediaId) || null;
+  if (c.type === 'audio') return S.audioEls.get(c.mediaId) || null;
+  return null;
+}
+
+function getAudioSource(mediaId) {
+  if (!S.audioCtx) return null;
+  const el = S.videoEls.get(mediaId) || S.audioEls.get(mediaId);
+  if (!el) return null;
+  const existing = S.sources.get(mediaId);
+  if (existing && existing.el === el) return existing;
+  try {
+    const src = S.audioCtx.createMediaElementSource(el);
+    const rec = { el, src };
+    S.sources.set(mediaId, rec);
+    return rec;
+  } catch (e) {
+    return null;
+  }
+}
+
+function startClipAudio(c, t) {
+  const el = mediaElementForClip(c);
+  if (!el) return null;
+  const state = { el, gain: null, lastV: null };
+  if (ensureAudio()) {
+    const rec = getAudioSource(c.mediaId);
+    if (rec) {
+      try {
+        const g = S.audioCtx.createGain();
+        g.gain.value = 0;
+        rec.src.connect(g);
+        g.connect(S.master);
+        if (S.exportDest) g.connect(S.exportDest);
+        state.gain = g;
+      } catch (e) {
+        state.gain = null;
+      }
     }
   }
-}
-function initAudio(){
-  if (S.audioCtx) { if(S.audioCtx.state==='suspended') S.audioCtx.resume().catch(()=>{}); return; }
   try {
-    S.audioCtx = new (window.AudioContext||window.webkitAudioContext)();
-    S.master = S.audioCtx.createGain(); S.master.gain.value=1; S.master.connect(S.audioCtx.destination);
-  } catch(e){}
+    el.muted = false;
+    el.volume = 1;
+    el.playbackRate = clamp(Number(c.speed) || 1, 0.25, 4);
+    const lt = clamp((t - c.start) * (c.speed || 1) + (c.offset || 0), 0, Math.max(0.05, (c.mediaDur || 1) - 0.05));
+    el.currentTime = lt;
+    const p = el.play();
+    if (p && p.catch) p.catch(() => {});
+  } catch (e) {}
+  S.activeAudio.set(c.id, state);
+  applyClipVolume(c, t, state);
+  return state;
 }
-function startAudio(){
-  stopAudio(); if(!S.audioCtx) return;
-  const t=S.playhead, now=S.audioCtx.currentTime;
+
+function applyClipVolume(c, t, state) {
+  const dur = Math.max(0.001, c.duration());
+  const lt = clamp(t - c.start, 0, dur);
+  let v = clamp(Number(c.volume ?? 1) || 0, 0, 2);
+  if (Number(c.fadeIn) > 0 && lt < Number(c.fadeIn)) v *= clamp(lt / Number(c.fadeIn), 0, 1);
+  if (Number(c.fadeOut) > 0 && dur - lt < Number(c.fadeOut)) v *= clamp((dur - lt) / Number(c.fadeOut), 0, 1);
+  if (state.gain && S.audioCtx) {
+    if (state.lastV == null || Math.abs(state.lastV - v) > 0.01) {
+      try { state.gain.gain.setTargetAtTime(v, S.audioCtx.currentTime, 0.02); } catch (e) { state.gain.gain.value = v; }
+      state.lastV = v;
+    }
+  } else {
+    try { state.el.volume = clamp(v, 0, 1); } catch (e) {}
+  }
+}
+
+function stopClipAudio(id) {
+  const st = S.activeAudio.get(id);
+  if (!st) return;
+  if (st.gain) { try { st.gain.disconnect(); } catch (e) {} }
+  S.activeAudio.delete(id);
+}
+
+function syncMediaPlayback(t) {
+  const used = new Set();
   for (const c of S.clips) {
-    if (c.type!=='audio' && c.type!=='video') continue;
-    if (c.start>t+0.05 || c.end<=t) continue;
-    const el = S.videoEls.get(c.mediaId)||S.audioEls.get(c.mediaId); if(!el||!el.captureStream) continue;
-    try {
-      const stream = el.captureStream();
-      const src = S.audioCtx.createMediaStreamSource(stream);
-      const g = S.audioCtx.createGain();
-      const v = c.volume??1;
-      g.gain.setValueAtTime(0,now); g.gain.linearRampToValueAtTime(v,now+(c.fadeIn||0)+0.02);
-      const ue = c.end-t, fo = c.fadeOut||0;
-      if(fo>0 && ue>fo){ g.gain.setValueAtTime(v,now+ue-fo); g.gain.linearRampToValueAtTime(0,now+ue); }
-      src.connect(g).connect(S.master);
-      const lt = clamp((t-c.start)*(c.speed||1)+c.offset, 0, Math.max(0.05,(c.mediaDur||5)-0.05));
-      el.currentTime = lt; el.playbackRate = c.speed||1; el.play().catch(()=>{});
-      S.activeAudio.push({el,src,g});
-    } catch(e){}
+    if (c.type !== 'video' && c.type !== 'audio') continue;
+    const active = c.start <= t && c.end > t;
+    const state = S.activeAudio.get(c.id);
+    if (!active) {
+      if (state) stopClipAudio(c.id);
+      continue;
+    }
+    let st = state;
+    if (!st) st = startClipAudio(c, t);
+    if (!st) continue;
+    const lt = clamp((t - c.start) * (c.speed || 1) + (c.offset || 0), 0, Math.max(0.05, (c.mediaDur || 1) - 0.05));
+    if (!st.el.paused && Math.abs(st.el.currentTime - lt) > 0.3) {
+      try { st.el.currentTime = lt; } catch (e) {}
+    }
+    const rate = clamp(Number(c.speed) || 1, 0.25, 4);
+    if (st.el.playbackRate !== rate) { try { st.el.playbackRate = rate; } catch (e) {} }
+    applyClipVolume(c, t, st);
+    used.add(c.mediaId);
+  }
+  for (const [mid, el] of [...S.videoEls, ...S.audioEls]) {
+    if (!used.has(mid) && !el.paused) { try { el.pause(); } catch (e) {} }
   }
 }
-function stopAudio(){ for(const{el} of S.activeAudio)try{el.pause();}catch(e){} S.activeAudio=[]; }
 
-// ============================================================
-// Timeline
-// ============================================================
-function setupTimeline(){
+/* ---------------- timeline ---------------- */
+function setupTimeline() {
   const sc = $('#timelineScroll');
-  sc.addEventListener('mousedown', onTlDown);
-  sc.addEventListener('touchstart', onTlDown, {passive:false});
-}
-function onTlDown(e){
-  if(e.target.closest('.clip')) return;
-  const gx=ev=>ev.touches?ev.touches[0].clientX:ev.clientX;
-  seek(gx(e));
-  const mv=ev=>{if(ev.touches&&ev.cancelable)ev.preventDefault();seek(gx(ev));};
-  const up=()=>{document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);document.removeEventListener('touchmove',mv);document.removeEventListener('touchend',up);};
-  document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);
-  document.addEventListener('touchmove',mv,{passive:false});document.addEventListener('touchend',up);
-}
-function seek(cx){ const sc=$('#timelineScroll'),r=sc.getBoundingClientRect(),x=cx-r.left+sc.scrollLeft-S.trackLabelW; S.playhead=clamp(x/S.pxPerSec,0,totalDur()); pause(); updatePlayheadUI(); render(); }
-
-function niceStep(p){ const s=80/p; for(const n of [0.1,0.2,0.5,1,2,5,10,30,60]) if(n>=s*0.7) return n; return 10; }
-
-function renderTimeline(){
-  const pxps=S.pxPerSec, td=totalDur(), totalPx=Math.max(2200,td*pxps+300), lw=S.trackLabelW;
-  ['#videoClips','#overlayClips','#textClips','#audioClips'].forEach(id=>{const el=$(id);el.style.width=totalPx+'px';el.style.paddingLeft=lw+'px';el.style.boxSizing='border-box';});
-  const ruler=$('#ruler');ruler.style.width=totalPx+'px';ruler.style.paddingLeft=lw+'px';ruler.style.boxSizing='border-box';ruler.innerHTML='';
-  $$('.track-label').forEach(el=>el.style.width=lw+'px');
-  const step=niceStep(pxps);
-  for(let t=0;t<=td+step;t+=step){const tk=document.createElement('div');tk.className='ruler-tick'+(Math.abs(t%(step*2))<0.01?' major':'');tk.style.left=(lw+t*pxps)+'px';tk.textContent=fmtTime(t);ruler.appendChild(tk);}
-  $('#videoClips').innerHTML='';$('#overlayClips').innerHTML='';$('#textClips').innerHTML='';$('#audioClips').innerHTML='';
-  for(const c of S.clips){
-    const el=document.createElement('div');
-    const cls = c.type==='procedural'?'video':(c.type==='overlay-img'?'image':c.type);
-    el.className='clip '+cls;el.dataset.id=c.id;
-    el.style.left=(lw+c.start*pxps)+'px';el.style.width=(c.duration()*pxps)+'px';
-    const nm = c.type==='text'?(c.text||'Text').slice(0,16):c.type==='audio'?(c.name||'Audio'):c.type==='procedural'?'Sample':(c.name||'Clip');
-    el.innerHTML=`<div class="trim-handle trim-left"></div><div class="clip-name">${escapeHtml(nm)}</div><div class="trim-handle trim-right"></div>${c.keyframes?`<div class="kf-dot"></div>`:''}`;
-    if(c.keyframes){const kfd=document.createElement('div');kfd.className='kf-ticks';c.keyframes.filter(k=>k.prop==='_all').forEach(k=>{const d=document.createElement('div');d.className='kf-tick';d.style.left=((k.t-c.start)*pxps)+'px';kfd.appendChild(d);});el.appendChild(kfd);}
-    if(S.selId===c.id) el.classList.add('selected');
-    const tid = c.type==='audio'?'audioClips':c.type==='text'?'textClips':c.type==='overlay-img'?'overlayClips':'videoClips';
-    $('#'+tid).appendChild(el);
-  }
-  attachClipDnD();
-}
-let clipDrag=null;
-function attachClipDnD(){
-  $$('.clip').forEach(el=>{el.addEventListener('mousedown',dnd);el.addEventListener('touchstart',dnd,{passive:false});});
-}
-function dnd(e){
-  const el=e.target.closest('.clip');if(!el)return;
-  const clip=S.clips.find(c=>c.id===el.dataset.id);if(!clip)return;
-  if(e.cancelable)e.preventDefault();e.stopPropagation();
-  const isL=e.target.classList.contains('trim-left'),isR=e.target.classList.contains('trim-right');
-  const touch=!!e.touches,gx=ev=>touch?ev.touches[0].clientX:ev.clientX;
-  select(clip.id);pause();
-  clipDrag={type:isL?'trimLeft':isR?'trimRight':'move',id:clip.id,sx:gx(e),os:clip.start,oe:clip.end,oo:clip.offset};
-  const mv=ev=>{if(touch&&ev.cancelable)ev.preventDefault();applyCipDrag(gx(ev));};
-  const up=()=>{document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);document.removeEventListener('touchmove',mv);document.removeEventListener('touchend',up);if(clipDrag){saveHistory();clipDrag=null;}};
-  document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);
-  document.addEventListener('touchmove',mv,{passive:false});document.addEventListener('touchend',up);
-}
-function applyCipDrag(cx){
-  if(!clipDrag)return;
-  const c=S.clips.find(x=>x.id===clipDrag.id);if(!c)return;
-  const dx=(cx-clipDrag.sx)/S.pxPerSec;
-  if(clipDrag.type==='move'){c.start=Math.max(0,clipDrag.os+dx);c.end=c.start+(clipDrag.oe-clipDrag.os);}
-  else if(clipDrag.type==='trimLeft'){const ns=Math.max(0,clipDrag.os+dx);const nd=clipDrag.oe-ns;if(nd<0.2)return;const md=c.mediaDur||nd;const off=clipDrag.oo+(clipDrag.os-ns);if(off<0)return;c.offset=clamp(off,0,Math.max(0,md-nd));c.start=ns;}
-  else if(clipDrag.type==='trimRight'){let ne=clipDrag.oe+dx;const nd=ne-c.start;if(nd<0.2)return;if(c.type==='video'||c.type==='audio'){const md=c.mediaDur||nd;if(c.offset+nd>md+0.05)ne=c.start+(md-c.offset);}c.end=ne;}
-  renderTimeline();render();updatePlayheadUI();
+  sc.addEventListener('mousedown', onRulerDown);
+  sc.addEventListener('touchstart', onRulerDown, { passive: false });
+  const tracks = $('#tracks');
+  tracks.addEventListener('mousedown', onClipDown);
+  tracks.addEventListener('touchstart', onClipDown, { passive: false });
 }
 
-function updatePlayheadUI(){
-  const left = S.trackLabelW + S.playhead*S.pxPerSec;
-  $('#playheadLine').style.left=left+'px';
-  $('#curTime').textContent=fmtTime(S.playhead);$('#totTime').textContent=fmtTime(totalDur());
-  const sc=$('#timelineScroll'),vl=sc.scrollLeft,vr=vl+sc.clientWidth;
-  if(left<vl+30||left>vr-60)sc.scrollLeft=clamp(left-sc.clientWidth/2,0,sc.scrollWidth);
+function pointerClientX(e) {
+  return (e.touches && e.touches[0] ? e.touches[0].clientX : e.clientX);
 }
 
-// ============================================================
-// Selection / clip panel
-// ============================================================
-function select(id){ S.selId=id; $$('.clip').forEach(el=>el.classList.toggle('selected',el.dataset.id===id)); showClipPanel(); render(); }
-function selected(){ return S.clips.find(c=>c.id===S.selId); }
-function deselect(){ S.selId=null; $$('.clip').forEach(el=>el.classList.remove('selected')); hideClipPanel(); render(); }
-function showClipPanel(){
-  const c=selected();if(!c)return hideClipPanel();
-  const con=$('#clipPanelContent');con.innerHTML='';
-  const mk=(i,l,f,d)=>{const b=document.createElement('button');b.className='clip-action'+(d?' danger':'');b.innerHTML=`<span style="font-size:18px">${i}</span><span>${l}</span>`;b.addEventListener('click',f);con.appendChild(b);};
-  mk('✂','Split',()=>splitAt(c,S.playhead));
-  mk('🗑','Delete',deleteSel,true);
-  mk('⧉','Dup',dupSel);
-  if(c.type!=='audio'&&c.type!=='procedural'){
-    mk('↔','Flip',()=>{c.flipX=!c.flipX;render();saveHistory();});
-    mk('↻','Rotate',()=>{c.rotation=((c.rotation||0)+90)%360;render();saveHistory();});
+function onRulerDown(e) {
+  if (e.target.closest('.clip')) return;
+  // On touch, leave empty track swipes to the native horizontal scroller.
+  // Tapping/dragging the ruler still scrubs.
+  if (e.touches && e.touches.length && !e.target.closest('.ruler')) return;
+  if (e.cancelable) e.preventDefault();
+  S._noAutoScroll = true;
+  seekFromClientX(pointerClientX(e));
+  const mv = ev => {
+    if (ev.cancelable) ev.preventDefault();
+    seekFromClientX(pointerClientX(ev));
+  };
+  const up = () => {
+    S._noAutoScroll = false;
+    document.removeEventListener('mousemove', mv);
+    document.removeEventListener('mouseup', up);
+    document.removeEventListener('touchmove', mv);
+    document.removeEventListener('touchend', up);
+  };
+  document.addEventListener('mousemove', mv);
+  document.addEventListener('mouseup', up);
+  document.addEventListener('touchmove', mv, { passive: false });
+  document.addEventListener('touchend', up);
+}
+
+function seekFromClientX(cx) {
+  const sc = $('#timelineScroll');
+  const r = sc.getBoundingClientRect();
+  const x = cx - r.left + sc.scrollLeft;
+  S.playhead = clamp(x / S.pxPerSec, 0, totalDur());
+  pause();
+  updatePlayheadUI();
+  render();
+}
+
+function niceStep(pxPerSec) {
+  const min = 80 / pxPerSec;
+  for (const n of [0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60, 120]) {
+    if (n >= min * 0.7) return n;
   }
-  if(c.type==='text') mk('✎','Edit',()=>openTextFor(c));
-  if(c.type==='video'||c.type==='audio'){
-    slider(con,'Speed',0.25,4,0.05,c.speed??1,v=>{setSpeed(c,v);renderTimeline();return v.toFixed(2)+'×';});
-    slider(con,'Vol',0,2,0.05,c.volume??1,v=>{c.volume=v;return Math.round(v*100)+'%';});
+  return 120;
+}
+
+function targetTrack(c) {
+  if (c.type === 'audio') return 'audio';
+  if (c.type === 'text') return 'text';
+  if (c.type === 'overlay-img') return 'overlay';
+  return 'video';
+}
+
+function renderTimeline() {
+  if (!editorScreen || editorScreen.classList.contains('hidden')) return;
+  const sc = $('#timelineScroll');
+  const pxps = S.pxPerSec;
+  const td = totalDur();
+  const totalPx = Math.max(sc.clientWidth || 600, Math.ceil(td * pxps + 160));
+  const ruler = $('#ruler');
+  ruler.style.width = totalPx + 'px';
+  $('#tracks').style.width = totalPx + 'px';
+  ruler.innerHTML = '';
+
+  const step = niceStep(pxps);
+  let i = 0;
+  for (let t = 0; t <= td + step; t += step, i++) {
+    const tk = document.createElement('div');
+    tk.className = 'ruler-tick' + (i % 2 === 0 ? ' major' : '');
+    tk.style.left = (t * pxps) + 'px';
+    tk.textContent = fmtTime(t);
+    ruler.appendChild(tk);
   }
-  if(c.type==='image'||c.type==='overlay-img'||c.type==='text'){
-    slider(con,'Opacity',0,1,0.05,c.opacity??1,v=>{c.opacity=v;return Math.round(v*100)+'%';});
+
+  const lanes = { video: $('#videoClips'), overlay: $('#overlayClips'), text: $('#textClips'), audio: $('#audioClips') };
+  for (const k in lanes) {
+    lanes[k].innerHTML = '';
+    lanes[k].style.width = totalPx + 'px';
   }
-  if(c.type!=='audio'&&c.type!=='text'){
-    slider(con,'Scale',0.2,3,0.05,c.scale??1,v=>{c.scale=v;return v.toFixed(2)+'×';});
+
+  // Track clip containers must span the full scrolled width, not just the viewport.
+  $$('.track-clips').forEach(el => { el.style.width = totalPx + 'px'; });
+
+  for (const c of S.clips) {
+    const el = document.createElement('div');
+    const lane = targetTrack(c);
+    let cls = lane === 'overlay' ? 'image' : lane;
+    if (c.type === 'procedural') cls = 'video';
+    el.className = 'clip ' + cls;
+    el.dataset.id = c.id;
+    el.style.left = Math.max(0, c.start * pxps) + 'px';
+    el.style.width = Math.max(6, (c.end - c.start) * pxps) + 'px';
+    const name = c.type === 'text' ? (c.text || 'Text').slice(0, 22)
+      : c.type === 'procedural' ? 'Sample'
+        : (c.name || (c.type === 'audio' ? 'Audio' : 'Clip'));
+    el.title = name;
+    el.innerHTML = '<div class="trim-handle trim-left"></div><div class="clip-name">' + esc(name) +
+      '</div><div class="trim-handle trim-right"></div>' + (c.keyframes && c.keyframes.length ? '<div class="kf-dot"></div>' : '');
+    if (c.keyframes && c.keyframes.length) {
+      const kfd = document.createElement('div');
+      kfd.className = 'kf-ticks';
+      c.keyframes.filter(k => k.prop === '_all').forEach(k => {
+        const d = document.createElement('div');
+        d.className = 'kf-tick';
+        d.style.left = clamp(k.t, 0, c.end - c.start) * pxps + 'px';
+        kfd.appendChild(d);
+      });
+      el.appendChild(kfd);
+    }
+    if (S.selId === c.id) el.classList.add('selected');
+    lanes[lane].appendChild(el);
+  }
+  updatePlayheadUI();
+}
+
+let clipDrag = null;
+function onClipDown(e) {
+  const el = e.target.closest('.clip');
+  if (!el) return;
+  const clip = S.clips.find(c => c.id === el.dataset.id);
+  if (!clip) return;
+  if (e.cancelable) e.preventDefault();
+  e.stopPropagation();
+  const trimLeft = e.target.classList.contains('trim-left');
+  const trimRight = e.target.classList.contains('trim-right');
+  select(clip.id);
+  pause();
+  S._noAutoScroll = true;
+  clipDrag = {
+    id: clip.id,
+    type: trimLeft ? 'trimLeft' : trimRight ? 'trimRight' : 'move',
+    sx: pointerClientX(e),
+    os: clip.start,
+    oe: clip.end,
+    oo: clip.offset || 0,
+    moved: false
+  };
+  const mv = ev => {
+    if (ev.cancelable) ev.preventDefault();
+    applyClipDrag(pointerClientX(ev));
+  };
+  const up = () => {
+    document.removeEventListener('mousemove', mv);
+    document.removeEventListener('mouseup', up);
+    document.removeEventListener('touchmove', mv);
+    document.removeEventListener('touchend', up);
+    S._noAutoScroll = false;
+    if (clipDrag) {
+      clipDrag = null;
+      saveHistory();
+      refreshPanel();
+    }
+  };
+  document.addEventListener('mousemove', mv);
+  document.addEventListener('mouseup', up);
+  document.addEventListener('touchmove', mv, { passive: false });
+  document.addEventListener('touchend', up);
+}
+
+function applyClipDrag(cx) {
+  if (!clipDrag) return;
+  const c = S.clips.find(x => x.id === clipDrag.id);
+  if (!c) return;
+  if (!clipDrag.moved) {
+    if (Math.abs(cx - clipDrag.sx) <= 2) return;
+    clipDrag.moved = true;
+  }
+  const dx = (cx - clipDrag.sx) / S.pxPerSec;
+  if (clipDrag.type === 'move') {
+    c.start = Math.max(0, clipDrag.os + dx);
+    c.end = c.start + (clipDrag.oe - clipDrag.os);
+  } else if (clipDrag.type === 'trimLeft') {
+    let ns = clamp(clipDrag.os + dx, 0, clipDrag.oe - 0.2);
+    if (c.type === 'video' || c.type === 'audio') {
+      const sp = Number(c.speed) || 1;
+      const newOffset = clipDrag.oo + (ns - clipDrag.os) * sp;
+      const minStart = clipDrag.os - clipDrag.oo / sp;
+      if (newOffset < 0) ns = Math.max(0, minStart);
+      c.offset = Math.max(0, clipDrag.oo + (ns - clipDrag.os) * sp);
+    }
+    c.start = ns;
+  } else if (clipDrag.type === 'trimRight') {
+    let ne = Math.max(c.start + 0.2, clipDrag.oe + dx);
+    if (c.type === 'video' || c.type === 'audio') {
+      const maxDur = ((c.mediaDur || ne) - (c.offset || 0)) / (c.speed || 1);
+      ne = Math.min(ne, c.start + maxDur);
+    }
+    c.end = Math.max(c.start + 0.2, ne);
+  }
+  renderTimeline();
+  render();
+  updatePlayheadUI();
+}
+
+function updatePlayheadUI() {
+  const sc = $('#timelineScroll');
+  if (!sc) return;
+  const left = S.playhead * S.pxPerSec;
+  $('#playheadLine').style.left = left + 'px';
+  $('#curTime').textContent = fmtTime(S.playhead);
+  $('#totTime').textContent = fmtTime(totalDur());
+  if (S._noAutoScroll) return;
+  const viewL = sc.scrollLeft;
+  const viewR = viewL + sc.clientWidth;
+  if (left < viewL + 24 || left > viewR - 50) {
+    sc.scrollLeft = clamp(left - sc.clientWidth * 0.4, 0, Math.max(0, sc.scrollWidth));
+  }
+}
+
+/* ---------------- selection + clip panel ---------------- */
+function select(id) {
+  S.selId = id;
+  $$('.clip').forEach(el => el.classList.toggle('selected', el.dataset.id === id));
+  if (S.tab !== 'edit') renderTab(S.tab);
+  else showClipPanel();
+  render();
+}
+
+function deselect() {
+  S.selId = null;
+  $$('.clip').forEach(el => el.classList.remove('selected'));
+  hideClipPanel();
+  if (S.tab !== 'edit') renderTab(S.tab);
+  render();
+}
+
+function showClipPanel() {
+  const c = selected();
+  if (!c) { hideClipPanel(); return; }
+  const con = $('#clipPanelContent');
+  con.innerHTML = '';
+  const mk = (icon, label, fn, danger) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'clip-action' + (danger ? ' danger' : '');
+    b.innerHTML = `<span style="font-size:17px">${icon}</span><span>${label}</span>`;
+    b.addEventListener('click', fn);
+    con.appendChild(b);
+    return b;
+  };
+  const info = document.createElement('div');
+  info.className = 'clip-action';
+  info.style.pointerEvents = 'none';
+  info.innerHTML = `<strong>${esc(c.type === 'text' ? (c.text || 'Text') : (c.name || c.type))}</strong><span>${c.duration().toFixed(1)}s</span>`;
+  con.appendChild(info);
+
+  mk('✂', 'Split', () => { if (!splitAt(c, S.playhead)) toast('Playhead is outside this clip'); });
+  mk('🗑', 'Delete', deleteSelected, true);
+  mk('⧉', 'Dup', duplicateSelected);
+  mk('◆', 'Key', addKeyframeAtPlayhead);
+  if (c.type === 'text') {
+    mk('✎', 'Edit', () => openTextFor(c));
+  }
+  if (c.type !== 'audio' && c.type !== 'text') {
+    mk('↔', 'Flip H', () => { c.flipX = !c.flipX; render(); saveHistory(); });
+    mk('↕', 'Flip V', () => { c.flipY = !c.flipY; render(); saveHistory(); });
+    mk('↻', 'Rotate', () => { c.rotation = ((Number(c.rotation) || 0) + 90) % 360; render(); saveHistory(); });
+  }
+  if (c.type === 'video' || c.type === 'audio') {
+    slider(con, 'Speed', 0.25, 4, 0.05, c.speed ?? 1, v => {
+      setSpeed(c, v);
+      renderTimeline();
+    }, v => v.toFixed(2) + '×');
+  }
+  if (c.type === 'video' || c.type === 'audio') {
+    slider(con, 'Volume', 0, 2, 0.05, c.volume ?? 1, v => { c.volume = v; }, v => Math.round(v * 100) + '%');
+  }
+  if (c.type === 'text') {
+    slider(con, 'Size', 12, 180, 1, c.size ?? 38, v => { c.size = v; }, v => Math.round(v) + 'px');
+    slider(con, 'Rotation', -180, 180, 1, c.rotation ?? 0, v => { c.rotation = v; }, v => Math.round(v) + '°');
+  } else if (c.type === 'image' || c.type === 'overlay-img' || c.type === 'video') {
+    slider(con, 'Opacity', 0, 1, 0.05, c.opacity ?? 1, v => { c.opacity = v; }, v => Math.round(v * 100) + '%');
+    slider(con, 'Scale', 0.2, 3, 0.05, c.scale ?? 1, v => { c.scale = v; }, v => v.toFixed(2) + '×');
+  }
+  if (c.type === 'image' || c.type === 'overlay-img' || c.type === 'text' || c.type === 'video') {
+    mk('⤢', 'Reset', () => {
+      c.scale = 1;
+      c.opacity = 1;
+      c.rotation = 0;
+      c.flipX = false;
+      c.flipY = false;
+      c.x = 0.5;
+      c.y = c.type === 'text' ? 0.35 : 0.5;
+      if (c.type === 'text') c.size = 38;
+      render();
+      renderTimeline();
+      saveHistory();
+    });
   }
   $('#clipPanel').classList.remove('hidden');
 }
-function hideClipPanel(){ $('#clipPanel').classList.add('hidden'); }
-function slider(c,l,mn,mx,st,v,fn){
-  const r=document.createElement('div');r.className='slider-row';r.innerHTML=`<label>${l} <span class="v"></span></label><input type="range" min="${mn}" max="${mx}" step="${st}" value="${v}">`;
-  const inp=$('input',r);$('.v',r).textContent=fn(v);
-  inp.addEventListener('input',()=>{$('.v',r).textContent=fn(Number(inp.value));render();});
-  inp.addEventListener('change',()=>saveHistory());
-  c.appendChild(r);
-}
-function splitAtPlayhead(){const t=S.playhead;S.clips.filter(c=>c.start<t-0.05&&c.end>t+0.05).forEach(c=>splitAt(c,t));if(S.clips.some(c=>c.start<t-0.05&&c.end>t+0.05))toast('Split');else toast('No clip at playhead');}
-function splitAt(c,t){if(t<=c.start+0.05||t>=c.end-0.05)return;const so=c.offset+(t-c.start)*(c.speed||1);const r=installClip(JSON.parse(JSON.stringify(c)));r.id=uid();r.start=t;r.end=c.end;r.offset=so;c.end=t;S.clips.push(r);renderTimeline();saveHistory();}
-function deleteSel(){const c=selected();if(!c)return;S.clips=S.clips.filter(x=>x.id!==c.id);S.selId=null;hideClipPanel();renderTimeline();render();saveHistory();toast('Deleted');}
-function dupSel(){const c=selected();if(!c)return;const copy=installClip(JSON.parse(JSON.stringify(c)));copy.id=uid();copy.start=c.end;copy.end=copy.start+c.duration();S.clips.push(copy);renderTimeline();saveHistory();toast('Duplicated');}
-function setSpeed(c,s){c.speed=s;if(c.type==='video'||c.type==='audio')c.end=c.start+(c.mediaDur-c.offset)/s;}
 
-// ============================================================
-// Tabs (bottom)
-// ============================================================
-function setupTabs(){
-  $$('.tab-btn').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tab)));
+function hideClipPanel() {
+  const p = $('#clipPanel');
+  if (p) p.classList.add('hidden');
 }
-function setTab(tab){
-  S.tab=tab;
-  $$('.tab-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
+
+function refreshPanel() {
+  if (S.tab === 'edit') showClipPanel();
+  else renderTab(S.tab);
+}
+
+function slider(parent, label, min, max, step, value, onInput, format) {
+  const row = document.createElement('div');
+  row.className = 'slider-row';
+  const lab = document.createElement('label');
+  const span = document.createElement('span');
+  lab.textContent = label;
+  lab.appendChild(span);
+  const input = document.createElement('input');
+  input.type = 'range';
+  input.min = min;
+  input.max = max;
+  input.step = step;
+  input.value = clamp(Number(value) || 0, min, max);
+  const paint = v => { span.textContent = format ? format(v) : String(v); };
+  paint(Number(input.value));
+  input.addEventListener('input', () => {
+    const v = Number(input.value);
+    paint(v);
+    onInput(v);
+    render();
+  });
+  input.addEventListener('change', () => { saveHistory(); });
+  row.appendChild(lab);
+  row.appendChild(input);
+  parent.appendChild(row);
+  return input;
+}
+
+function setSpeed(c, s) {
+  s = clamp(Number(s) || 1, 0.25, 4);
+  let sourceRange = (c.end - c.start) * (Number(c.speed) || 1);
+  if (Number.isFinite(c.mediaDur)) sourceRange = Math.min(sourceRange, Math.max(0.2, c.mediaDur - (c.offset || 0)));
+  c.speed = s;
+  c.end = c.start + Math.max(0.2, sourceRange / s);
+}
+
+function splitAtPlayhead() {
+  const t = S.playhead;
+  const targets = S.clips.filter(c => c.start < t - 0.05 && c.end > t + 0.05);
+  if (!targets.length) { toast('No clip at playhead'); return; }
+  targets.forEach(c => splitAt(c, t));
+  renderTimeline();
+  refreshPanel();
+  render();
+  saveHistory();
+  toast(`Split ${targets.length} clip${targets.length > 1 ? 's' : ''}`);
+}
+
+function splitAt(c, t) {
+  if (t <= c.start + 0.05 || t >= c.end - 0.05) return false;
+  const right = installClip(JSON.parse(JSON.stringify(serializeClip(c))));
+  right.id = uid();
+  right.start = t;
+  right.end = c.end;
+  right.offset = (c.offset || 0) + (t - c.start) * (c.speed || 1);
+  const cut = t - c.start;
+  const keys = c.keyframes || [];
+  right.keyframes = keys.filter(k => k.t >= cut).map(k => ({ ...k, t: k.t - cut }));
+  c.keyframes = keys.filter(k => k.t <= cut).map(k => ({ ...k }));
+  c.end = t;
+  S.clips.push(right);
+  return true;
+}
+
+function deleteSelected() {
+  const c = selected();
+  if (!c) { toast('Select a clip first'); return; }
+  stopClipAudio(c.id);
+  if (S._welcomeId === c.id) S._welcomeId = null;
+  S.clips = S.clips.filter(x => x.id !== c.id);
+  S.selId = null;
+  hideClipPanel();
+  renderTimeline();
+  render();
+  saveHistory();
+  toast('Deleted');
+}
+
+function duplicateSelected() {
+  const c = selected();
+  if (!c) { toast('Select a clip first'); return; }
+  const copy = installClip(JSON.parse(JSON.stringify(serializeClip(c))));
+  copy.id = uid();
+  const dur = c.end - c.start;
+  copy.start = c.end;
+  copy.end = copy.start + dur;
+  copy.keyframes = (c.keyframes || []).map(k => ({ ...k }));
+  S.clips.push(copy);
+  S.selId = copy.id;
+  renderTimeline();
+  refreshPanel();
+  render();
+  saveHistory();
+  toast('Duplicated');
+}
+
+/* ---------------- bottom tabs + inline panels ---------------- */
+function setupTabs() {
+  $$('.tab-btn').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
+}
+
+function setTab(tab) {
+  S.tab = tab;
+  $$('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   hideClipPanel();
   renderTab(tab);
 }
-function renderTab(tab){
-  const ex=$('#inlinePanel');if(ex)ex.remove();
-  if(tab==='edit') return;
-  const panel=document.createElement('div');panel.id='inlinePanel';panel.className='clip-panel';
-  const sc=document.createElement('div');sc.className='panel-scroll';panel.appendChild(sc);
-  const close=document.createElement('button');close.className='icon-btn';close.textContent='✕';close.style.cssText='position:absolute;top:6px;right:8px;color:var(--text-dim);z-index:5';
-  close.addEventListener('click',()=>{panel.remove();$$('.tab-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab==='edit'));S.tab='edit';});
+
+function renderTab(tab) {
+  const existing = $('#inlinePanel');
+  if (existing) existing.remove();
+  if (tab === 'edit') {
+    if (selected()) showClipPanel();
+    return;
+  }
+  const panel = document.createElement('div');
+  panel.id = 'inlinePanel';
+  panel.className = 'clip-panel';
+  const sc = document.createElement('div');
+  sc.className = 'panel-scroll';
+  panel.appendChild(sc);
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'icon-btn panel-close';
+  close.textContent = '✕';
+  close.setAttribute('aria-label', 'Close panel');
+  close.addEventListener('click', () => setTab('edit'));
   panel.appendChild(close);
 
-  if(tab==='filters'){
-    // group filters by category
+  const clip = selected();
+  const needClip = () => { if (!clip) { toast('Select a clip first'); return null; } return clip; };
+
+  if (tab === 'filters') {
     const groups = {};
-    PRESETS_FILTERS.forEach(f=>{(groups[f.group]=groups[f.group]||[]).push(f);});
-    Object.entries(groups).forEach(([grp,list])=>{
-      const h=document.createElement('div');h.className='panel-group-title';h.textContent=grp;sc.appendChild(h);
-      const wrap=document.createElement('div');wrap.className='chip-row';sc.appendChild(wrap);
-      list.forEach((f,i)=>{
-        const chip=document.createElement('div');chip.className='chip';
-        chip.innerHTML=`<div class="chip-preview" style="background:linear-gradient(135deg,#667eea,#764ba2)"></div>${f.name}`;
-        chip.addEventListener('click',()=>{$$('.chip',panel).forEach(c=>c.classList.remove('active'));chip.classList.add('active');applyFilter(f.values,f.overlay);});
+    (window.PRESETS_FILTERS || []).forEach(f => { (groups[f.group] = groups[f.group] || []).push(f); });
+    Object.entries(groups).forEach(([group, list]) => {
+      const h = document.createElement('div');
+      h.className = 'panel-group-title';
+      h.textContent = group;
+      sc.appendChild(h);
+      const wrap = document.createElement('div');
+      wrap.className = 'chip-row';
+      sc.appendChild(wrap);
+      list.forEach(f => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'chip';
+        chip.innerHTML = '<span class="chip-preview" style="background:linear-gradient(135deg,#4ea8ff,#25c38e)"></span>' + esc(f.name);
+        chip.addEventListener('click', () => {
+          const c = needClip();
+          if (!c) return;
+          c.filters = { ...f.values };
+          c.overlayColor = f.overlay ? f.overlay.color : null;
+          $$('.chip', panel).forEach(x => x.classList.remove('active'));
+          chip.classList.add('active');
+          render();
+          saveHistory();
+        });
         wrap.appendChild(chip);
       });
     });
-  } else if(tab==='adjust'){
-    PRESETS_ADJUST.forEach(([k,lb,mn,mx,v,st])=>{
-      const c=selected();
-      const cur=c?.filters?.[k]??v;
-      slider(sc,lb,mn,mx,st,cur,val=>{const cc=selected();if(!cc)return val;cc.filters=cc.filters||{};cc.filters[k]=val;return val.toFixed(k==='blurpx'||k==='hueRotate'?1:2);});
-    });
-    const rst=document.createElement('div');rst.className='chip chip-reset';rst.innerHTML=`<div class="chip-preview" style="background:var(--danger)"></div>Reset`;
-    rst.addEventListener('click',()=>{const c=selected();if(c){c.filters={};c.effect=null;render();saveHistory();toast('Reset');}});
-    sc.appendChild(rst);
-  } else if(tab==='effects'){
-    PRESETS_EFFECTS.forEach((n,i)=>{const chip=document.createElement('div');chip.className='chip'+(i===0?' active':'');chip.innerHTML=`<div class="chip-preview" style="background:linear-gradient(135deg,#f093fb,#f5576c)"></div>${n}`;chip.addEventListener('click',()=>{$$('.chip',panel).forEach(c=>c.classList.remove('active'));chip.classList.add('active');const c=selected();if(!c){toast('Select a clip');return;}c.effect=n==='None'?null:n;render();saveHistory();});sc.appendChild(chip);});
-  } else if(tab==='audio'){
-    const ab=document.createElement('div');ab.className='clip-action';ab.innerHTML='<svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg><span>Add</span>';ab.addEventListener('click',()=>$('#importAudio').click());sc.appendChild(ab);
-    const s=selected();
-    if(s && (s.type==='audio'||s.type==='video')){
-      slider(sc,'Volume',0,2,0.05,s.volume??1,v=>{s.volume=v;return Math.round(v*100)+'%';});
-      slider(sc,'Fade In',0,3,0.1,s.fadeIn??0,v=>{s.fadeIn=v;return v.toFixed(1)+'s';});
-      slider(sc,'Fade Out',0,3,0.1,s.fadeOut??0,v=>{s.fadeOut=v;return v.toFixed(1)+'s';});
-      slider(sc,'Speed',0.25,4,0.05,s.speed??1,v=>{setSpeed(s,v);renderTimeline();return v.toFixed(2)+'×';});
-    }
-  } else if(tab==='text'){
-    const ab=document.createElement('div');ab.className='clip-action';ab.innerHTML='<svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg><span>Add Text</span>';ab.addEventListener('click',()=>openTextModal());sc.appendChild(ab);
-    ['Title','Subtitle','Caption','Quote','Neon','Retro','Animated'].forEach(p=>{const chip=document.createElement('div');chip.className='chip';chip.innerHTML=`<div class="chip-preview" style="background:linear-gradient(135deg,#ffb347,#ff7a59);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:10px">T</div>${p}`;chip.addEventListener('click',()=>openTextModal(p));sc.appendChild(chip);});
-  } else if(tab==='overlay'){
-    const ab=document.createElement('div');ab.className='clip-action';ab.innerHTML='<svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg><span>Add Image</span>';ab.addEventListener('click',()=>$('#importImage').click());sc.appendChild(ab);
-    const s=selected();if(s){
-      slider(sc,'Opacity',0,1,0.05,s.opacity??1,v=>{s.opacity=v;return Math.round(v*100)+'%';});
-      slider(sc,'Scale',0.2,3,0.05,s.scale??1,v=>{s.scale=v;return v.toFixed(2)+'×';});
-      slider(sc,'Rotate',-180,180,1,s.rotation??0,v=>{s.rotation=v;return Math.round(v)+'°';});
-    }
-  } else if(tab==='keyframes'){
-    const ab=document.createElement('div');ab.className='clip-action';ab.innerHTML='<span style="font-size:20px">◆</span><span>Add Key</span>';ab.addEventListener('click',addKeyframeAtPlayhead);sc.appendChild(ab);
-    const rb=document.createElement('div');rb.className='clip-action danger';rb.innerHTML='<span style="font-size:20px">✕</span><span>Remove</span>';rb.addEventListener('click',removeKeyframeAtPlayhead);sc.appendChild(rb);
-    const cb=document.createElement('div');cb.className='clip-action';cb.innerHTML='<span style="font-size:20px">⟳</span><span>Clear All</span>';cb.addEventListener('click',()=>{const c=selected();if(c){c.keyframes=[];render();saveHistory();toast('Keyframes cleared');}});sc.appendChild(cb);
-    const help=document.createElement('div');help.className='panel-hint';help.textContent='Select a clip, move playhead, change a property (scale/position/opacity/text size), then tap Add Key. Move playhead again, adjust property, add another key — KritiCut animates between them.';sc.appendChild(help);
-    const s=selected();if(s&&s.keyframes){const info=document.createElement('div');info.className='panel-hint';info.textContent=`${s.keyframes.length} keyframe(s) on this clip`;sc.appendChild(info);}
-  }
-  $('#resizeHandle').before(panel);
-}
-function applyFilter(vals, overlay){
-  const c=selected();if(!c){toast('Select a clip first');return;}
-  c.filters={...vals};c.overlayColor=overlay?.color||null;render();saveHistory();
-}
-
-// ============================================================
-// Zoom
-// ============================================================
-function setupZoom(){
-  $('#btnZoomIn').addEventListener('click',()=>setZoom(S.zoom*1.25));
-  $('#btnZoomOut').addEventListener('click',()=>setZoom(S.zoom/1.25));
-}
-function setZoom(z){S.zoom=clamp(z,0.2,12);S.pxPerSec=60*S.zoom;$('#zoomVal').textContent=S.zoom.toFixed(1)+'×';renderTimeline();updatePlayheadUI();}
-
-// ============================================================
-// Resize handle
-// ============================================================
-function setupResize(){
-  const h=$('#resizeHandle');let drag=false,sy,sh;
-  $('#timelineSection').style.height=S.tlHeight+'px';
-  const begin=(y)=>{drag=true;sy=y;sh=S.tlHeight;h.classList.add('active');document.body.classList.add('resizing');};
-  const mv=(y)=>{if(!drag)return;let nh=sh+(y-sy);nh=clamp(nh,140,window.innerHeight*0.75);S.tlHeight=Math.round(nh);$('#timelineSection').style.height=nh+'px';requestAnimationFrame(resizeCanvas);};
-  const end=()=>{if(!drag)return;drag=false;h.classList.remove('active');document.body.classList.remove('resizing');localStorage.setItem('kc_tlh',S.tlHeight);setTimeout(resizeCanvas,50);};
-  h.addEventListener('mousedown',e=>{begin(e.clientY);e.preventDefault();e.stopPropagation();});
-  window.addEventListener('mousemove',e=>{if(drag){mv(e.clientY);e.preventDefault();}});
-  window.addEventListener('mouseup',end);
-  h.addEventListener('touchstart',e=>{begin(e.touches[0].clientY);e.preventDefault();},{passive:false});
-  window.addEventListener('touchmove',e=>{if(drag){mv(e.touches[0].clientY);e.preventDefault();}},{passive:false});
-  window.addEventListener('touchend',end);
-  h.addEventListener('dblclick',()=>{S.tlHeight=240;$('#timelineSection').style.height='240px';localStorage.removeItem('kc_tlh');resizeCanvas();toast('Timeline reset');});
-}
-
-// ============================================================
-// Keyframes
-// ============================================================
-function addKeyframeAtPlayhead(){
-  const c=selected();if(!c){toast('Select a clip first');return;}
-  c.keyframes=c.keyframes||[];
-  // For the current playhead, capture the current animated props
-  const t = S.playhead - c.start;
-  if (t < 0 || t > c.duration()) return toast('Playhead outside clip');
-  // Remove existing at same time
-  c.keyframes = c.keyframes.filter(k => Math.abs(k.t - t) > 0.05);
-  c.keyframes.push({
-    t,
-    prop: '_all',
-    x: c.x??0.5, y:c.y??0.5,
-    scale:c.scale??1, rot:c.rotation??0, opacity:c.opacity??1,
-    size:c.size||38,
-  });
-  c.keyframes.sort((a,b)=>a.t-b.t);
-  renderTimeline(); render(); saveHistory();
-  $('#kfHint').classList.remove('hidden');setTimeout(()=>$('#kfHint').classList.add('hidden'),900);
-  toast('Keyframe added');
-}
-function removeKeyframeAtPlayhead(){
-  const c=selected();if(!c||!c.keyframes)return;
-  const t=S.playhead-c.start;
-  const before=c.keyframes.length;
-  c.keyframes=c.keyframes.filter(k=>Math.abs(k.t-t)>0.08);
-  if(before===c.keyframes.length) return toast('No keyframe here');
-  renderTimeline();render();saveHistory();toast('Keyframe removed');
-}
-function applyKeyframes(t){
-  // Reset _kf cache
-  for (const c of S.clips) c._kf = null;
-  for (const c of S.clips) {
-    if (!c.keyframes||c.keyframes.length===0) continue;
-    if (c.start>t||c.end<=t) continue;
-    const lt = t - c.start;
-    const kfs = c.keyframes.filter(k=>k.prop==='_all').sort((a,b)=>a.t-b.t);
-    if (kfs.length===0) continue;
-    // Find segment
-    let a=kfs[0], b=kfs[kfs.length-1];
-    if (lt<=a.t) return applyKF(c,a);
-    if (lt>=b.t) return applyKF(c,b);
-    for (let i=0;i<kfs.length-1;i++){
-      if(kfs[i].t<=lt && kfs[i+1].t>=lt){a=kfs[i];b=kfs[i+1];break;}
-    }
-    const pct = (lt-a.t)/(b.t-a.t);
-    const e = pct; // linear for now; ease-in-out could be added
-    c._kf = {
-      x: lerp(a.x,b.x,e), y: lerp(a.y,b.y,e),
-      scale: lerp(a.scale,b.scale,e),
-      rot: lerp(a.rot,b.rot,e),
-      opacity: lerp(a.opacity,b.opacity,e),
-      size: lerp(a.size,b.size,e),
-    };
-  }
-}
-function applyKF(c,k){ c._kf={x:k.x,y:k.y,scale:k.scale,rot:k.rot,opacity:k.opacity,size:k.size}; }
-function lerp(a,b,t){return a+(b-a)*t;}
-function drawKeyframeMarkers(){
-  // Draw small diamonds on playhead if keyframe at playhead
-  const c=selected();if(!c||!c.keyframes)return;
-}
-
-// ============================================================
-// Import
-// ============================================================
-function setupImport(){
-  const modal = $('#importModal');
-  $('#closeImport').addEventListener('click',()=>closeImport());
-  // Click on backdrop closes
-  modal.addEventListener('click', e => { if (e.target === modal) closeImport(); });
-  // Hook all file inputs
-  const hookInput = (id, type) => {
-    const inp = $(id);
-    inp.addEventListener('change', async e => {
-      const files = [...e.target.files];
-      if (!files.length) return;
-      for (const f of files) await addFile(f, type);
-      renderLib();
-      toast(`Added ${files.length} file(s)`);
-      // Auto close after import
-      closeImport();
-      // Reset so same file can be reselected
-      inp.value = '';
-    });
-  };
-  hookInput('#importVideo','video');
-  hookInput('#importImage','image');
-  hookInput('#importAudio','audio');
-  $('#addSample').addEventListener('click',()=>{
-    const c=makeWelcome(getNextInsert(),getNextInsert()+8);
-    S.clips.push(c);
-    renderTimeline();render();updatePlayheadUI();saveHistory();
-    toast('Sample added');
-    closeImport();
-  });
-}
-function closeImport(){ $('#importModal').classList.add('hidden'); }
-function doFiles(list,type){const files=[...list];(async()=>{for(const f of files) await addFile(f,type);renderLib();toast(`Added ${files.length}`);})();}
-function addFile(file,type){
-  return new Promise((resolve)=>{
-    const src=URL.createObjectURL(file);
-    const entry={id:uid(),type,src,name:file.name};
-    let el;
-    if (type==='video') {
-      el = document.createElement('video');
-      el.muted = true; el.playsInline = true; el.preload = 'auto';
-      el.setAttribute('playsinline',''); el.setAttribute('webkit-playsinline','');
-      el.crossOrigin = 'anonymous';
-    } else if (type==='audio') {
-      el = document.createElement('audio');
-      el.preload = 'auto';
+  } else if (tab === 'adjust') {
+    if (!clip) {
+      sc.appendChild(hint('Select a clip to adjust brightness, contrast and more.'));
     } else {
-      el = new Image();
+      (window.PRESETS_ADJUST || []).forEach(([key, label, min, max, def, step]) => {
+        const cur = clip.filters && clip.filters[key] != null ? clip.filters[key] : def;
+        slider(sc, label, min, max, step, cur, v => {
+          clip.filters = clip.filters || {};
+          clip.filters[key] = v;
+        }, v => key === 'hueRotate' ? Math.round(v) + '°' : (step < 0.1 ? v.toFixed(2) : v.toFixed(1)));
+      });
     }
-    entry.mediaEl = el;
-    const finalize = () => {
-      entry.duration = el.duration || (type==='image'?5:5);
-      entry.mediaDur = entry.duration;
-      if (type==='video') S.videoEls.set(entry.id, el);
-      else if (type==='image') S.imageEls.set(entry.id, el);
-      else S.audioEls.set(entry.id, el);
-      entry.thumb = type==='image'?src:'';
-      S.mediaLib.push(entry);
-      addClip(entry.id, getNextInsert());
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'chip chip-reset';
+    reset.innerHTML = '<span class="chip-preview" style="background:var(--danger)"></span>Reset';
+    reset.addEventListener('click', () => {
+      const c = needClip();
+      if (!c) return;
+      c.filters = {};
+      c.effect = null;
+      c.overlayColor = null;
+      render();
+      renderTab('adjust');
+      saveHistory();
+      toast('Adjustments reset');
+    });
+    sc.appendChild(reset);
+  } else if (tab === 'effects') {
+    (window.PRESETS_EFFECTS || []).forEach(n => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chip' + (clip && (clip.effect || 'None') === n ? ' active' : '');
+      chip.innerHTML = '<span class="chip-preview" style="background:linear-gradient(135deg,#f093fb,#f5576c)"></span>' + esc(n);
+      chip.addEventListener('click', () => {
+        const c = needClip();
+        if (!c) return;
+        c.effect = n === 'None' ? null : n;
+        $$('.chip', panel).forEach(x => x.classList.remove('active'));
+        chip.classList.add('active');
+        render();
+        saveHistory();
+      });
+      sc.appendChild(chip);
+    });
+  } else if (tab === 'audio') {
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'clip-action';
+    add.innerHTML = '<span style="font-size:18px">＋</span><span>Add audio</span>';
+    add.addEventListener('click', () => {
+      pause();
+      const input = $('#importAudio');
+      input.click();
+    });
+    sc.appendChild(add);
+    if (clip && (clip.type === 'audio' || clip.type === 'video')) {
+      slider(sc, 'Volume', 0, 2, 0.05, clip.volume ?? 1, v => { clip.volume = v; }, v => Math.round(v * 100) + '%');
+      slider(sc, 'Fade in', 0, 3, 0.1, clip.fadeIn ?? 0, v => { clip.fadeIn = v; }, v => v.toFixed(1) + 's');
+      slider(sc, 'Fade out', 0, 3, 0.1, clip.fadeOut ?? 0, v => { clip.fadeOut = v; }, v => v.toFixed(1) + 's');
+      slider(sc, 'Speed', 0.25, 4, 0.05, clip.speed ?? 1, v => { setSpeed(clip, v); renderTimeline(); }, v => v.toFixed(2) + '×');
+    } else {
+      sc.appendChild(hint('Select a video or audio clip to change volume, fades and speed.'));
+    }
+  } else if (tab === 'text') {
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'clip-action';
+    add.innerHTML = '<span style="font-size:18px">＋</span><span>Add text</span>';
+    add.addEventListener('click', () => openTextModal());
+    sc.appendChild(add);
+    const texts = S.clips.filter(c => c.type === 'text');
+    texts.forEach(c => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chip';
+      chip.innerHTML = '<span class="chip-preview" style="background:linear-gradient(135deg,#ffb347,#ff7a59);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:16px">T</span>' + esc((c.text || 'Text').slice(0, 12));
+      chip.addEventListener('click', () => { select(c.id); openTextFor(c); });
+      sc.appendChild(chip);
+    });
+    if (!texts.length) sc.appendChild(hint('Add a title, subtitle or caption. Drag it on the preview to position it.'));
+  } else if (tab === 'overlay') {
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'clip-action';
+    add.innerHTML = '<span style="font-size:18px">＋</span><span>Add image</span>';
+    add.addEventListener('click', () => {
+      pause();
+      const input = $('#importImage');
+      input.dataset.overlay = '1';
+      input.click();
+    });
+    sc.appendChild(add);
+    if (clip && (clip.type === 'overlay-img' || clip.type === 'image')) {
+      slider(sc, 'Opacity', 0, 1, 0.05, clip.opacity ?? 1, v => { clip.opacity = v; }, v => Math.round(v * 100) + '%');
+      slider(sc, 'Scale', 0.2, 3, 0.05, clip.scale ?? 1, v => { clip.scale = v; }, v => v.toFixed(2) + '×');
+      slider(sc, 'Rotate', -180, 180, 1, clip.rotation ?? 0, v => { clip.rotation = v; }, v => Math.round(v) + '°');
+    } else {
+      sc.appendChild(hint('Overlay images play on top of the video. Use import → Photo for a full-frame photo.'));
+    }
+  } else if (tab === 'keyframes') {
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'clip-action';
+    add.innerHTML = '<span style="font-size:18px">◆</span><span>Add key</span>';
+    add.addEventListener('click', addKeyframeAtPlayhead);
+    sc.appendChild(add);
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'clip-action danger';
+    rm.innerHTML = '<span style="font-size:18px">✕</span><span>Remove</span>';
+    rm.addEventListener('click', removeKeyframeAtPlayhead);
+    sc.appendChild(rm);
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'clip-action';
+    clear.innerHTML = '<span style="font-size:18px">⟳</span><span>Clear all</span>';
+    clear.addEventListener('click', () => {
+      const c = needClip();
+      if (!c) return;
+      c.keyframes = [];
       renderTimeline();
-      updatePlayheadUI();
       render();
       saveHistory();
-      // Generate video thumbnail after a tick
-      if (type==='video') {
-        setTimeout(()=>{
-          try {
-            const c=document.createElement('canvas'); c.width=120; c.height=Math.round(120*9/16);
-            const cx=c.getContext('2d');
-            cx.drawImage(el,0,0,c.width,c.height);
-            entry.thumb=c.toDataURL('image/jpeg',0.7);
-            renderLib();
-          } catch(e){}
-        }, 300);
-      }
-      resolve(entry);
-    };
-    // Listen for multiple events to be safe across browsers
-    let settled = false;
-    const onReady = () => { if (settled) return; settled=true; finalize(); };
-    el.addEventListener('loadedmetadata', onReady, {once:true});
-    el.addEventListener('loadeddata', onReady, {once:true});
-    el.addEventListener('canplay', onReady, {once:true});
-    // Safety timeout
-    setTimeout(()=>{ if(!settled) onReady(); }, 4000);
-    // Assign src after hooking listeners (for images that load synchronously)
-    el.src = src;
-    if (type==='image' && el.complete) onReady();
-    // Trigger load for images
-    if (type==='image') el.src = src;
-  });
-}
-function renderLib(){
-  const lib=$('#mediaLibrary');lib.innerHTML='';
-  S.mediaLib.forEach(m=>{const it=document.createElement('div');it.className='media-lib-item';it.innerHTML=(m.thumb?`<img src="${m.thumb}" style="width:100%;height:100%;object-fit:cover">`:`<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-dim);font-size:22px">${m.type==='audio'?'♪':'▣'}</div>`)+`<div class="lib-label">${escapeHtml(m.name)}</div><div class="lib-badge">${m.type}</div><button class="add-to-timeline">+</button>`;$('.add-to-timeline',it).addEventListener('click',e=>{e.stopPropagation();addClip(m.id,getNextInsert());render();renderTimeline();saveHistory();});lib.appendChild(it);});
-}
-function addClip(mid,start){const m=S.mediaLib.find(x=>x.id===mid);if(!m)return;let c;if(m.type==='video')c=installClip({id:uid(),type:'video',mediaId:mid,name:m.name,start,end:start+(m.duration||5),offset:0,mediaDur:m.duration||5,z:1,filters:{},speed:1,volume:1,opacity:1,scale:1,rotation:0,x:0.5,y:0.5});else if(m.type==='image')c=installClip({id:uid(),type:'overlay-img',mediaId:mid,name:m.name,start,end:start+4,offset:0,mediaDur:9999,z:3,filters:{},opacity:1,scale:0.5,rotation:0,x:0.5,y:0.5});else if(m.type==='audio')c=installClip({id:uid(),type:'audio',mediaId:mid,name:m.name,start,end:start+(m.duration||5),offset:0,mediaDur:m.duration||5,z:0,speed:1,volume:1,fadeIn:0,fadeOut:0});if(c)S.clips.push(c);}
-function getNextInsert(){let t=0;for(const c of S.clips)if(c.type!=='text'&&c.type!=='audio')t=Math.max(t,c.end);return t;}
-function makeWelcome(s,e){return installClip({id:uid(),type:'procedural',name:'Welcome',start:s,end:e,offset:0,mediaDur:e-s,z:1,filters:{},speed:1,volume:1,opacity:1,scale:1,rotation:0,x:0.5,y:0.5});}
-function addWelcomeClip(){S.clips.push(makeWelcome(0,10));}
-
-// ============================================================
-// Text modal (advanced)
-// ============================================================
-function setupTextModal(){
-  $('#closeText').addEventListener('click',()=>{$('#textModal').classList.add('hidden');S.editingTextClip=null;});
-  $('#textModal').addEventListener('click',e=>{if(e.target.id==='textModal')$('#textModal').classList.add('hidden');});
-  $('#addTextBtn').addEventListener('click',()=>{if(S.editingTextClip)updateText();else addText();});
-  // Tabs
-  $$('.ttab').forEach(b=>b.addEventListener('click',()=>{$$('.ttab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$$('.ttab-panel').forEach(p=>p.classList.add('hidden'));$('#ttab-'+b.dataset.ttab).classList.remove('hidden');}));
-  // Build font grid
-  const fg=$('#fontGrid');fg.innerHTML='';
-  TEXT_FONTS.forEach(f=>{const el=document.createElement('div');el.className='font-item';el.style.fontFamily=f.css;el.textContent=f.name;el.dataset.css=f.css;el.addEventListener('click',()=>{$$('.font-item').forEach(x=>x.classList.remove('active'));el.classList.add('active');S.textDraft.fontCss=f.css;S.textDraft.font=f.name;});fg.appendChild(el);});
-  // Animations
-  buildAnimList('animIn', TEXT_ANIMATIONS_IN);
-  buildAnimList('animOut', TEXT_ANIMATIONS_OUT);
-  buildAnimList('animLoop', TEXT_ANIMATIONS_LOOP);
-  // Effects
-  const eg=$('#textEffectGrid');eg.innerHTML='';
-  TEXT_EFFECTS.forEach(e=>{const b=document.createElement('div');b.className='effect-chip';b.textContent=e.name;b.addEventListener('click',()=>{$$('.effect-chip',eg).forEach(x=>x.classList.remove('active'));b.classList.add('active');S.textDraft.effectCss=e.css;});eg.appendChild(b);});
-  // Bubbles
-  const bg=$('#bubbleGrid');bg.innerHTML='';
-  TEXT_BUBBLES.forEach(b=>{const el=document.createElement('div');el.className='bubble-chip';el.textContent=b;el.addEventListener('click',()=>{$$('.bubble-chip',bg).forEach(x=>x.classList.remove('active'));el.classList.add('active');S.textDraft.bubble=b;});bg.appendChild(el);});
-  // Bold/Italic/Underline/Align
-  $('#ttab-style .mini-btn').forEach(b=>b.addEventListener('click',()=>{const w=b.dataset.weight;if(w==='left'||w==='center'||w==='right')S.textDraft.align=w;else S.textDraft[w]=!S.textDraft[w];b.classList.toggle('active');}));
-  // Presets
-  const presets=['Title','Subtitle','Caption','Quote','Neon','Retro','Minimal','Animated'];
-  const tp=$('#textPresets');tp.innerHTML='';
-  presets.forEach((p,i)=>{const el=document.createElement('div');el.className='text-preset'+(i===0?' active':'');el.textContent=p;el.addEventListener('click',()=>{$$('.text-preset').forEach(x=>x.classList.remove('active'));el.classList.add('active');applyTextPreset(p);});tp.appendChild(el);});
-}
-function buildAnimList(id, list){
-  const wrap=$('#'+id);
-  list.forEach(n=>{const b=document.createElement('button');b.type='button';b.className='anim-chip';b.textContent=n;b.addEventListener('click',()=>{$$('.anim-chip',wrap).forEach(x=>x.classList.remove('active'));b.classList.add('active');S.textDraft[id==='animIn'?'animIn':id==='animOut'?'animOut':'animLoop']=n;});wrap.appendChild(b);});
-}
-function applyTextPreset(p){
-  const sets={Title:{size:64,bold:true,strokeW:2,color:'#fff'},Subtitle:{size:36,strokeW:0,color:'#fff'},Caption:{size:24,strokeW:2,color:'#fff'},Quote:{size:32,italic:true,color:'#ffe08a'},Neon:{size:50,color:'#3df2b2',effectCss:'text-shadow:0 0 8px currentColor,0 0 16px currentColor,0 0 32px currentColor;'},Retro:{size:44,color:'#ffb347',fontCss:'Impact, sans-serif'},Minimal:{size:34,color:'#fff'},Animated:{size:50,animIn:'Pop In',animLoop:'Pulse',color:'#fff'}};
-  const s=sets[p]||sets.Title;
-  Object.assign(S.textDraft,s);
-  $('#textSize').val=s.size||38;
-  $('#textColor').val(s.color||'#fff');
-  $('#textStrokeW').val(s.strokeW||0);
-}
-function openTextModal(preset){S.textDraft={bold:true,size:38,color:'#fff',stroke:'#000',strokeW:0,opacity:1,animIn:'Fade In',animOut:'None',animLoop:'None',animDur:0.6,fontCss:'sans-serif'};S.editingTextClip=null;$('#textInput').value='';$('#addTextBtn').textContent='Add to Timeline';$('#textModal').classList.remove('hidden');if(preset)applyTextPreset(preset);setTimeout(()=>$('#textInput').focus(),200);}
-function openTextFor(c){openTextModal();S.editingTextClip=c;$('#textInput').value=c.text||'';$('#textSize').val=c.size||38;$('#textColor').val=c.color||'#fff';$('#textStroke').val=c.stroke||'#000';$('#textStrokeW').val=c.strokeW||0;$('#textOpacity').val=c.opacity??1;$('#textDur').value=c.duration();$('#textSpacing').val=c.letterSpacing||0;$('#textShadowBlur').val=c.shadowBlur||0;S.textDraft={...c};$('#addTextBtn').textContent='Update';}
-function readTextDraft(){
-  S.textDraft.text = $('#textInput').value.trim();
-  S.textDraft.size = Number($('#textSize').value);
-  S.textDraft.color = $('#textColor').value;
-  S.textDraft.stroke = $('#textStroke').value;
-  S.textDraft.strokeW = Number($('#textStrokeW').value);
-  S.textDraft.shadowBlur = Number($('#textShadowBlur').value);
-  S.textDraft.shadow = $('#textShadow').value;
-  S.textDraft.letterSpacing = Number($('#textSpacing').value);
-  S.textDraft.opacity = Number($('#textOpacity').value);
-  S.textDraft.dur = Number($('#textDur').value);
-  S.textDraft.animDur = Number($('#animDur').value);
-}
-function addText(){readTextDraft();if(!S.textDraft.text){toast('Enter text');return;}
-  const d=S.textDraft;
-  const c=installClip({id:uid(),type:'text',text:d.text,fontCss:d.fontCss,size:d.size,color:d.color,stroke:d.stroke,strokeW:d.strokeW,shadow:d.shadow,shadowBlur:d.shadowBlur,letterSpacing:d.letterSpacing,opacity:d.opacity,bold:d.bold,italic:d.italic,underline:d.underline,align:d.align,animIn:d.animIn,animOut:d.animOut,animLoop:d.animLoop,animDur:d.animDur,effectCss:d.effectCss,bubble:d.bubble,start:S.playhead,end:S.playhead+d.dur,offset:0,mediaDur:d.dur,z:10,x:0.5,y:0.35});
-  S.clips.push(c);$('#textModal').classList.add('hidden');renderTimeline();render();saveHistory();toast('Text added — drag to position');}
-function updateText(){readTextDraft();const c=S.editingTextClip;if(!c)return;Object.assign(c,S.textDraft,{text:S.textDraft.text});c.end=c.start+S.textDraft.dur;$('#textModal').classList.add('hidden');S.editingTextClip=null;render();renderTimeline();saveHistory();toast('Updated');}
-
-// ============================================================
-// Preset modal
-// ============================================================
-function setupPresetModal(){
-  const modal = $('#presetModal');
-  $('#closePreset').addEventListener('click',()=>modal.classList.add('hidden'));
-  modal.addEventListener('click',e=>{if(e.target===modal)modal.classList.add('hidden');});
-  $('#importPreset').addEventListener('change',e=>{const f=e.target.files[0];if(f)importPresetFile(f);e.target.value='';});
-  $('#exportPreset').addEventListener('click',exportCurrentAsPreset);
-  $('#applyPreset').addEventListener('click',()=>{const c=selected();if(!c||!S._activePreset){toast('Pick a preset first');return;}if(S._activePreset.filters)c.filters={...S._activePreset.filters};render();saveHistory();toast('Preset applied');});
-}
-function openPresetModal(){
-  $('#presetModal').classList.remove('hidden');
-  const list=$('#presetList');list.innerHTML='';
-  const all=[...BUILTIN_PRESETS,...loadUserPresets()];
-  all.forEach(p=>{const el=document.createElement('div');el.className='preset-item';el.innerHTML=`<strong>${escapeHtml(p.name)}</strong><button class="mini-btn">Apply</button>`;$('button',el).addEventListener('click',()=>{const c=selected();if(!c){toast('Select a clip first');return;}if(p.data.filters)c.filters={...p.data.filters};S._activePreset=p.data;render();saveHistory();toast(`Applied "${p.name}"`);});list.appendChild(el);});
-}
-function importPresetFile(file, fromHome){
-  if(!file)return;
-  const r=new FileReader();
-  r.onload=()=>{try{const d=JSON.parse(r.result);const user=loadUserPresets();user.push({name:d.name||'Imported',data:d});saveUserPresets(user);toast('Preset imported');if(fromHome)buildHome();else openPresetModal();}catch(e){toast('Invalid preset file');}};
-  r.readAsText(file);
-}
-function exportCurrentAsPreset(){
-  const c=selected();if(!c){toast('Select a clip first');return;}
-  const name=prompt('Preset name:','My Preset');if(!name)return;
-  const data={name,filters:c.filters||{},textStyle:c.type==='text'?{size:c.size,color:c.color,fontCss:c.fontCss}:null};
-  const user=loadUserPresets();user.push({name,data});saveUserPresets(user);
-  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
-  const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`${name.replace(/\s+/g,'_')}.kcpreset`;a.click();URL.revokeObjectURL(url);
-  toast('Preset saved & downloaded');openPresetModal();
-}
-
-// ============================================================
-// Export (up to 4K)
-// ============================================================
-function setupExportModal(){
-  const modal = $('#exportModal');
-  $('#btnExport').addEventListener('click',()=>modal.classList.remove('hidden'));
-  $('#closeExport').addEventListener('click',()=>modal.classList.add('hidden'));
-  modal.addEventListener('click',e=>{if(e.target===modal)modal.classList.add('hidden');});
-  $('#startExport').addEventListener('click',doExport);
-}
-async function doExport(){
-  const res=Number($('#expRes').value),fps=Number($('#expFPS').value),br=Number($('#expBitrate').value),wm=$('#expWM').value;
-  $('#expProgress').classList.remove('hidden');$('#expResult').classList.add('hidden');$('#startExport').disabled=true;
-  const eW=Math.round(res*9/16),eH=res;
-  const oW=canvas.width,oH=canvas.height,oDW=canvas._w,oDH=canvas._h;
-  canvas.width=eW;canvas.height=eH;canvas._w=eW;canvas._h=eH;
-  overlay.style.width=eW+'px';overlay.style.height=eH+'px';overlay.style.left=0;overlay.style.top=0;
-  const cStream=canvas.captureStream(fps);
-  initAudio();
-  const dest=S.audioCtx.createMediaStreamDestination();
-  const nodes=[];
-  for(const clip of S.clips){
-    if(clip.type!=='audio'&&clip.type!=='video')continue;
-    const el=S.videoEls.get(clip.mediaId)||S.audioEls.get(clip.mediaId);if(!el)continue;
-    try{const src=S.audioCtx.createMediaElementSource(el);const g=S.audioCtx.createGain();g.gain.value=0;src.connect(g).connect(dest);nodes.push({el,src,g,clip});}catch(e){}
+      toast('Keyframes cleared');
+    });
+    sc.appendChild(clear);
+    sc.appendChild(hint('Select a clip, move the playhead, change scale/position/opacity, then tap Add key. Add another key later — KritiCut animates between them.'));
+    if (clip && clip.keyframes && clip.keyframes.length) {
+      sc.appendChild(hint(`${clip.keyframes.length} keyframe(s) on this clip`));
+    }
   }
-  const tracks=[...cStream.getVideoTracks(),...dest.stream.getAudioTracks()].filter(Boolean);
-  const combined=new MediaStream(tracks);
-  let mime='';for(const m of ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'])if(MediaRecorder.isTypeSupported(m)){mime=m;break;}
-  const rec=new MediaRecorder(combined,{mimeType:mime,videoBitsPerSecond:br,audioBitsPerSecond:128000});
-  const chunks=[];
-  rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
-  rec.onstop=()=>{
-    const blob=new Blob(chunks,{type:mime||'video/webm'});const url=URL.createObjectURL(blob);
-    $('#exportPreview').src=url;$('#downloadBtn').href=url;$('#downloadBtn').download=`kriticut_${res}p_${Date.now()}.webm`;
-    $('#expResult').classList.remove('hidden');$('#expProgress').classList.add('hidden');$('#startExport').disabled=false;
-    canvas.width=oW;canvas.height=oH;canvas._w=oDW;canvas._h=oDH;overlay.style.width=oDW+'px';overlay.style.height=oDH+'px';resizeCanvas();render();toast('Export complete!');
-    nodes.forEach(({src,g})=>{try{src.disconnect();g.disconnect();}catch(e){}});
+
+  $('#resizeHandle').before(panel);
+}
+
+function hint(text) {
+  const d = document.createElement('div');
+  d.className = 'panel-hint';
+  d.textContent = text;
+  return d;
+}
+
+/* ---------------- zoom ---------------- */
+function setupZoom() {
+  $('#btnZoomIn').addEventListener('click', () => setZoom(S.zoom * 1.25));
+  $('#btnZoomOut').addEventListener('click', () => setZoom(S.zoom / 1.25));
+}
+
+function setZoom(z) {
+  S.zoom = clamp(z, 0.2, 12);
+  S.pxPerSec = 60 * S.zoom;
+  $('#zoomVal').textContent = S.zoom.toFixed(1) + '×';
+  renderTimeline();
+  updatePlayheadUI();
+}
+
+/* ---------------- timeline resize ---------------- */
+function setupResize() {
+  const h = $('#resizeHandle');
+  const section = $('#timelineSection');
+  section.style.height = S.tlHeight + 'px';
+  let drag = false, sy = 0, sh = 0;
+  const maxH = () => Math.min(600, Math.round((window.innerHeight || 800) * 0.65));
+  const begin = y => {
+    drag = true; sy = y; sh = S.tlHeight;
+    h.classList.add('active');
+    document.body.classList.add('resizing');
   };
-  rec.start(100);
-  S.playhead=0;pause();
-  const t0=performance.now(),a0=S.audioCtx.currentTime;
-  nodes.forEach(({el,g,clip})=>{
-    el.currentTime=clamp(clip.offset,0,Math.max(0.05,(clip.mediaDur||clip.duration())-0.1));
-    el.playbackRate=clip.speed||1;
-    g.gain.cancelScheduledValues(a0);g.gain.setValueAtTime(0,a0);g.gain.setValueAtTime(0,a0+clip.start);
-    g.gain.linearRampToValueAtTime(clip.volume??1,a0+clip.start+(clip.fadeIn||0)+0.02);
-    const endT=clip.end,fo=clip.fadeOut||0;
-    if(fo>0&&endT-fo>clip.start){g.gain.setValueAtTime(clip.volume??1,a0+endT-fo);g.gain.linearRampToValueAtTime(0,a0+endT);}
-    try{el.play();}catch(e){}setTimeout(()=>{try{el.pause();}catch(e){}},(endT+0.3)*1000);
+  const move = y => {
+    if (!drag) return;
+    const nh = clamp(sh + (y - sy), TL_MIN, maxH());
+    S.tlHeight = Math.round(nh);
+    section.style.height = S.tlHeight + 'px';
+    requestAnimationFrame(resizeCanvas);
+  };
+  const end = () => {
+    if (!drag) return;
+    drag = false;
+    h.classList.remove('active');
+    document.body.classList.remove('resizing');
+    writeLS('kc_tlh', S.tlHeight);
+    setTimeout(resizeCanvas, 50);
+  };
+  h.addEventListener('mousedown', e => { begin(e.clientY); e.preventDefault(); });
+  window.addEventListener('mousemove', e => { if (drag) { move(e.clientY); e.preventDefault(); } });
+  window.addEventListener('mouseup', end);
+  h.addEventListener('touchstart', e => { begin(e.touches[0].clientY); e.preventDefault(); }, { passive: false });
+  window.addEventListener('touchmove', e => { if (drag) { move(e.touches[0].clientY); e.preventDefault(); } }, { passive: false });
+  window.addEventListener('touchend', end);
+  h.addEventListener('dblclick', () => {
+    S.tlHeight = 250;
+    section.style.height = '250px';
+    removeLS('kc_tlh');
+    resizeCanvas();
+    toast('Timeline reset');
   });
-  const totalD=totalDur();
-  const tick=()=>{
-    const el=(performance.now()-t0)/1000;S.playhead=Math.min(el,totalD);render();updatePlayheadUI();
-    const p=S.playhead/totalD*100;$('#expFill').style.width=p+'%';
-    $('#expStatus').textContent=`Exporting ${res}p… ${p.toFixed(0)}% ${fmtTime(S.playhead)}/${fmtTime(totalD)}`;
-    if(S.playhead>=totalD){rec.stop();nodes.forEach(({el})=>{try{el.pause();}catch(e){}});
-      // Draw watermark if requested
-      if(wm!=='0'){
-        ctx.save();ctx.resetTransform?ctx.resetTransform():ctx.setTransform(1,0,0,1,0,0);
-        ctx.fillStyle='rgba(255,255,255,0.5)';ctx.font='bold 24px sans-serif';ctx.textAlign='right';
-        ctx.fillText('KritiCut',eW-20,eH-20);ctx.restore();
+}
+
+/* ---------------- keyframes ---------------- */
+function addKeyframeAtPlayhead() {
+  const c = selected();
+  if (!c) { toast('Select a clip first'); return; }
+  const t = S.playhead - c.start;
+  if (t < -0.01 || t > c.duration() + 0.01) { toast('Playhead is outside this clip'); return; }
+  const kf = c._kf || {};
+  const key = {
+    t: clamp(t, 0, c.duration()),
+    prop: '_all',
+    x: kf.x ?? c.x ?? 0.5,
+    y: kf.y ?? c.y ?? 0.35,
+    scale: kf.scale ?? c.scale ?? 1,
+    rot: kf.rot ?? c.rotation ?? 0,
+    opacity: kf.opacity ?? c.opacity ?? 1,
+    size: kf.size ?? c.size ?? 38
+  };
+  c.keyframes = (c.keyframes || []).filter(k => Math.abs(k.t - key.t) > 0.05);
+  c.keyframes.push(key);
+  c.keyframes.sort((a, b) => a.t - b.t);
+  renderTimeline();
+  render();
+  saveHistory();
+  $('#kfHint').classList.remove('hidden');
+  setTimeout(() => $('#kfHint').classList.add('hidden'), 900);
+  toast('Keyframe added');
+}
+
+function removeKeyframeAtPlayhead() {
+  const c = selected();
+  if (!c || !c.keyframes || !c.keyframes.length) { toast('No keyframes on this clip'); return; }
+  const t = S.playhead - c.start;
+  const before = c.keyframes.length;
+  c.keyframes = c.keyframes.filter(k => Math.abs(k.t - t) > 0.1);
+  if (before === c.keyframes.length) { toast('No keyframe at the playhead'); return; }
+  renderTimeline();
+  render();
+  saveHistory();
+  toast('Keyframe removed');
+}
+
+function applyKeyframes(t) {
+  for (const c of S.clips) {
+    c._kf = null;
+    if (!c.keyframes || !c.keyframes.length) continue;
+    if (c.start > t || c.end <= t) continue;
+    const lt = t - c.start;
+    const kfs = c.keyframes.filter(k => k.prop === '_all').sort((a, b) => a.t - b.t);
+    if (!kfs.length) continue;
+    if (lt <= kfs[0].t) { setKF(c, kfs[0]); continue; }
+    const last = kfs[kfs.length - 1];
+    if (lt >= last.t) { setKF(c, last); continue; }
+    for (let i = 0; i < kfs.length - 1; i++) {
+      const a = kfs[i], b = kfs[i + 1];
+      if (a.t <= lt && b.t >= lt) {
+        const p = clamp((lt - a.t) / Math.max(0.0001, b.t - a.t), 0, 1);
+        c._kf = {
+          x: lerp(a.x, b.x, p), y: lerp(a.y, b.y, p),
+          scale: lerp(a.scale, b.scale, p), rot: lerp(a.rot, b.rot, p),
+          opacity: lerp(a.opacity, b.opacity, p), size: lerp(a.size, b.size, p)
+        };
+        break;
+      }
+    }
+  }
+}
+
+function setKF(c, k) {
+  c._kf = { x: k.x, y: k.y, scale: k.scale, rot: k.rot, opacity: k.opacity, size: k.size };
+}
+
+function lerp(a, b, t) { return (Number(a) || 0) + ((Number(b) || 0) - (Number(a) || 0)) * t; }
+
+/* ---------------- import ---------------- */
+function setupImport() {
+  hookMediaInput('#importVideo', 'video');
+  hookMediaInput('#importImage', 'image');
+  hookMediaInput('#importAudio', 'audio');
+
+  $('#addSample').addEventListener('click', () => {
+    const previous = takeWelcomePlaceholder();
+    const start = previous ? previous.start : getNextInsert();
+    const c = makeWelcome(start, start + 10);
+    if (previous && previous.filters) c.filters = { ...previous.filters };
+    if (previous && previous.effect) c.effect = previous.effect;
+    if (previous && previous.overlayColor) c.overlayColor = previous.overlayColor;
+    S.clips.push(c);
+    closeModal($('#importModal'));
+    renderTimeline();
+    select(c.id);
+    render();
+    saveHistory();
+    toast('Sample clip added');
+  });
+}
+
+function hookMediaInput(selector, type) {
+  const input = $(selector);
+  input.addEventListener('change', async e => {
+    const files = [...(e.target.files || [])];
+    input.value = '';
+    if (!files.length) return;
+    if (S._importing) { toast('An import is already running'); return; }
+    S._importing = true;
+    const asOverlay = type === 'image' && input.dataset.overlay === '1';
+    delete input.dataset.overlay;
+    let added = 0;
+    try {
+      for (const file of files) {
+        try {
+          const entry = await addFile(file, type, { asOverlay });
+          if (entry) added++;
+        } catch (err) {
+          console.warn('Import failed', file && file.name, err);
+          toast(`Could not import “${file && file.name ? file.name : 'file'}”`);
+        }
+      }
+    } finally {
+      S._importing = false;
+    }
+    renderLib();
+    if (added) {
+      saveHistory();
+      toast(`Added ${added} file${added > 1 ? 's' : ''}`);
+    } else {
+      toast('Nothing was imported');
+    }
+  });
+}
+
+async function addFile(file, type, opts = {}) {
+  if (!file) return null;
+  const looksRight = type === 'video' ? file.type.startsWith('video/') || /\.(mp4|webm|mov|m4v|ogv|mkv)$/i.test(file.name)
+    : type === 'audio' ? file.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|ogg|flac|opus)$/i.test(file.name)
+      : file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|avif|heic)$/i.test(file.name);
+  if (!looksRight) { toast(`“${file.name}” does not look like ${type}`); return null; }
+
+  const src = URL.createObjectURL(file);
+  const el = makeMediaElement(type, src);
+  const ok = await whenMediaReady(el, type, 12000);
+  if (!ok) {
+    try { URL.revokeObjectURL(src); } catch (e) {}
+    toast(`Could not read “${file.name}”`);
+    return null;
+  }
+  const duration = type === 'image' ? 5 : clamp(Number(el.duration) || 5, 0.2, 24 * 3600);
+  const entry = {
+    id: uid(), type, name: file.name, src, duration, mediaDur: duration, blob: file,
+    thumb: type === 'image' ? src : ''
+  };
+  S.mediaLib.push(entry);
+  if (type === 'video') S.videoEls.set(entry.id, el);
+  else if (type === 'image') S.imageEls.set(entry.id, el);
+  else S.audioEls.set(entry.id, el);
+
+  await storeMediaBlob(entry.id, file);
+
+  const welcome = (type === 'video' || (type === 'image' && !opts.asOverlay)) ? takeWelcomePlaceholder() : null;
+  const start = (type === 'audio' || opts.asOverlay)
+    ? clamp(S.playhead, 0, Math.max(0, totalDur()))
+    : getNextInsert();
+  const clip = addClip(entry.id, start, { asOverlay: !!opts.asOverlay, select: true });
+  if (clip) {
+    if (welcome) {
+      if (welcome.filters) clip.filters = { ...welcome.filters };
+      if (welcome.effect) clip.effect = welcome.effect;
+      if (welcome.overlayColor) clip.overlayColor = welcome.overlayColor;
+    }
+    select(clip.id);
+  }
+  if (type === 'video') setTimeout(() => makeVideoThumb(el, entry), 300);
+  renderLib();
+  renderTimeline();
+  render();
+  updatePlayheadUI();
+  return entry;
+}
+
+function makeVideoThumb(el, entry) {
+  if (!entry || entry._thumbDone) return;
+  const draw = () => {
+    try {
+      if (!el.videoWidth || !el.videoHeight) return;
+      const size = 160;
+      const cv = document.createElement('canvas');
+      cv.width = size; cv.height = size;
+      const c2 = cv.getContext('2d');
+      const scale = Math.max(size / el.videoWidth, size / el.videoHeight);
+      const w = el.videoWidth * scale, h = el.videoHeight * scale;
+      c2.drawImage(el, (size - w) / 2, (size - h) / 2, w, h);
+      entry.thumb = cv.toDataURL('image/jpeg', 0.7);
+      entry._thumbDone = true;
+      renderLib();
+    } catch (e) {}
+  };
+  if (el.readyState >= 2) draw();
+  else el.addEventListener('loadeddata', draw, { once: true });
+}
+
+function addClip(mediaId, start, opts = {}) {
+  const m = S.mediaLib.find(x => x.id === mediaId);
+  if (!m) return null;
+  const asOverlay = !!opts.asOverlay;
+  let c = null;
+  if (m.type === 'video') {
+    const dur = clamp(Number(m.duration) || 5, 0.2, 24 * 3600);
+    c = {
+      id: uid(), type: 'video', mediaId, name: m.name, start, end: start + dur,
+      offset: 0, mediaDur: dur, z: 1, filters: {}, speed: 1, volume: 1,
+      opacity: 1, scale: 1, rotation: 0, x: 0.5, y: 0.5
+    };
+  } else if (m.type === 'image') {
+    c = {
+      id: uid(), type: asOverlay ? 'overlay-img' : 'image', mediaId, name: m.name,
+      start, end: start + clamp(Number(m.duration) || 5, 0.5, 600), offset: 0, mediaDur: 600, z: asOverlay ? 3 : 1,
+      filters: {}, opacity: 1, scale: asOverlay ? 0.5 : 1, rotation: 0, x: 0.5, y: 0.5
+    };
+  } else if (m.type === 'audio') {
+    const dur = clamp(Number(m.duration) || 5, 0.2, 24 * 3600);
+    c = {
+      id: uid(), type: 'audio', mediaId, name: m.name, start, end: start + dur,
+      offset: 0, mediaDur: dur, z: 0, filters: {}, speed: 1, volume: 1,
+      fadeIn: 0, fadeOut: 0
+    };
+  }
+  if (!c) return null;
+  installClip(c);
+  S.clips.push(c);
+  if (opts.select !== false) S.selId = c.id;
+  renderTimeline();
+  render();
+  updatePlayheadUI();
+  return c;
+}
+
+function renderLib() {
+  const lib = $('#mediaLibrary');
+  if (!lib) return;
+  lib.innerHTML = '';
+  if (!S.mediaLib.length) {
+    const empty = document.createElement('div');
+    empty.className = 'media-empty';
+    empty.textContent = 'Imported video, photos and audio appear here.';
+    lib.appendChild(empty);
+    return;
+  }
+  for (const m of S.mediaLib) {
+    const it = document.createElement('div');
+    it.className = 'media-lib-item';
+    const thumb = m.thumb
+      ? `<img src="${m.thumb}" alt="">`
+      : `<div class="media-placeholder">${m.type === 'audio' ? '♪' : '▣'}</div>`;
+    it.innerHTML = thumb +
+      `<span class="lib-badge">${esc(m.type)}</span>` +
+      `<span class="lib-label">${esc(m.name)}</span>` +
+      `<span class="lib-actions"><button type="button" class="lib-btn add" aria-label="Add to timeline">＋</button>` +
+      `<button type="button" class="lib-btn del" aria-label="Remove media">✕</button></span>`;
+    $('.lib-btn.add', it).addEventListener('click', e => {
+      e.stopPropagation();
+      const start = m.type === 'audio' ? clamp(S.playhead, 0, totalDur()) : getNextInsert();
+      const c = addClip(m.id, start, {});
+      if (c) {
+        select(c.id);
+        saveHistory();
+        toast('Added to timeline');
+      }
+    });
+    $('.lib-btn.del', it).addEventListener('click', e => {
+      e.stopPropagation();
+      deleteMedia(m.id);
+    });
+    it.addEventListener('click', () => {
+      const start = m.type === 'audio' ? clamp(S.playhead, 0, totalDur()) : getNextInsert();
+      const c = addClip(m.id, start, {});
+      if (c) { select(c.id); saveHistory(); }
+    });
+    lib.appendChild(it);
+  }
+}
+
+function deleteMedia(id) {
+  const m = S.mediaLib.find(x => x.id === id);
+  if (!m) return;
+  if (!confirm(`Remove “${m.name}” from this project?`)) return;
+  const used = S.clips.filter(c => c.mediaId === id).length;
+  if (used && !confirm(`${used} clip(s) on the timeline use this media and will be removed too. Continue?`)) return;
+  const removedClipIds = S.clips.filter(c => c.mediaId === id).map(c => c.id);
+  S.clips = S.clips.filter(c => c.mediaId !== id);
+  if (!S.clips.some(c => c.id === S.selId)) S.selId = null;
+  S.mediaLib = S.mediaLib.filter(x => x.id !== id);
+  S.videoEls.delete(id); S.imageEls.delete(id); S.audioEls.delete(id);
+  if (S.sources.has(id)) {
+    try { S.sources.get(id).src.disconnect(); } catch (e) {}
+    S.sources.delete(id);
+  }
+  for (const clipId of removedClipIds) stopClipAudio(clipId);
+  try { URL.revokeObjectURL(m.src); } catch (e) {}
+  deleteMediaBlob(id);
+  renderLib();
+  renderTimeline();
+  render();
+  hideClipPanel();
+  saveHistory();
+  toast('Media removed');
+}
+
+/* ---------------- text modal ---------------- */
+const TEXT_PRESETS = ['Title', 'Subtitle', 'Caption', 'Quote', 'Neon', 'Retro', 'Minimal', 'Animated'];
+
+function defaultTextDraft() {
+  return {
+    text: '', fontCss: 'sans-serif', fontName: 'Sans', size: 38, color: '#ffffff',
+    stroke: '#000000', strokeW: 0, shadow: '#000000', shadowBlur: 0,
+    letterSpacing: 0, lineHeight: 1.2, opacity: 1, bg: null,
+    bold: true, italic: false, underline: false, align: 'center',
+    animIn: 'Fade In', animOut: 'None', animLoop: 'None', animDur: 0.6,
+    effectName: 'None', effectCss: '', bubble: 'None', presetName: 'Title',
+    dur: 3, x: 0.5, y: 0.35, rotation: 0
+  };
+}
+
+function textClipData(d) {
+  return {
+    text: d.text.trim(),
+    fontCss: d.fontCss, size: d.size, color: d.color, stroke: d.stroke, strokeW: d.strokeW,
+    shadow: d.shadow, shadowBlur: d.shadowBlur, letterSpacing: d.letterSpacing,
+    lineHeight: d.lineHeight, opacity: d.opacity, bold: d.bold, italic: d.italic,
+    underline: d.underline, align: d.align, bg: d.bg, animIn: d.animIn, animOut: d.animOut,
+    animLoop: d.animLoop, animDur: d.animDur, effectName: d.effectName, effectCss: d.effectCss,
+    bubble: d.bubble
+  };
+}
+
+function setupTextModal() {
+  $('#textInput').addEventListener('input', () => { readTextForm(); updateTextPreview(); });
+  ['textSize', 'textColor', 'textStroke', 'textShadow', 'textShadowBlur', 'textSpacing', 'textLineH', 'textOpacity', 'textDur', 'animDur'].forEach(id => {
+    $('#' + id).addEventListener('input', () => { readTextForm(); updateTextPreview(); });
+  });
+  $('#textBg').addEventListener('input', e => {
+    S.textDraft.bg = e.target.value;
+    updateTextPreview();
+  });
+  $('#textBgClear').addEventListener('click', () => {
+    S.textDraft.bg = null;
+    updateTextPreview();
+  });
+
+  $$('#ttab-style .mini-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      if (b.dataset.align) {
+        S.textDraft.align = b.dataset.align;
+      } else if (b.dataset.style) {
+        const key = b.dataset.style;
+        S.textDraft[key] = !S.textDraft[key];
+      }
+      updateTextPreview();
+      syncTextButtons();
+    });
+  });
+
+  $$('.ttab').forEach(b => {
+    b.addEventListener('click', () => {
+      $$('.ttab').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      $$('.ttab-panel').forEach(p => p.classList.add('hidden'));
+      const panel = $('#ttab-' + b.dataset.ttab);
+      if (panel) panel.classList.remove('hidden');
+    });
+  });
+
+  buildFontGrid();
+  buildAnimList('animIn', window.TEXT_ANIMATIONS_IN || []);
+  buildAnimList('animOut', window.TEXT_ANIMATIONS_OUT || []);
+  buildAnimList('animLoop', window.TEXT_ANIMATIONS_LOOP || []);
+  buildTextEffects();
+  buildTextBubbles();
+  buildTextPresetChips();
+
+  $('#addTextBtn').addEventListener('click', () => {
+    if (S.editingTextClip) updateTextClip();
+    else addTextClip();
+  });
+}
+
+function readTextForm() {
+  const d = S.textDraft;
+  d.text = $('#textInput').value;
+  d.size = Number($('#textSize').value) || 38;
+  d.color = $('#textColor').value;
+  d.stroke = $('#textStroke').value;
+  d.strokeW = Number($('#textStrokeW').value) || 0;
+  d.shadow = $('#textShadow').value;
+  d.shadowBlur = Number($('#textShadowBlur').value) || 0;
+  d.letterSpacing = Number($('#textSpacing').value) || 0;
+  d.lineHeight = Number($('#textLineH').value) || 1.2;
+  d.opacity = clamp(Number($('#textOpacity').value), 0, 1);
+  d.dur = clamp(Number($('#textDur').value) || 3, 0.5, 600);
+  d.animDur = clamp(Number($('#animDur').value) || 0.6, 0.2, 2);
+}
+
+function updateTextPreview() {
+  const el = $('#textPreviewInner');
+  if (!el) return;
+  applyTextStyles(el, { ...S.textDraft, text: S.textDraft.text || 'Your text' }, true);
+  el.style.opacity = String(clamp(Number(S.textDraft.opacity ?? 1), 0, 1));
+  el.style.transform = `rotate(${Number(S.textDraft.rotation) || 0}deg)`;
+}
+
+function syncTextButtons() {
+  const d = S.textDraft;
+  $$('#ttab-style .mini-btn').forEach(b => {
+    if (b.dataset.align) b.classList.toggle('active', d.align === b.dataset.align);
+    else if (b.dataset.style) b.classList.toggle('active', !!d[b.dataset.style]);
+  });
+  $$('#fontGrid .font-item').forEach(el => el.classList.toggle('active', el.dataset.css === d.fontCss));
+  $$('#animIn .anim-chip').forEach(b => b.classList.toggle('active', b.textContent === d.animIn));
+  $$('#animOut .anim-chip').forEach(b => b.classList.toggle('active', b.textContent === d.animOut));
+  $$('#animLoop .anim-chip').forEach(b => b.classList.toggle('active', b.textContent === d.animLoop));
+  $$('#textEffectGrid .effect-chip').forEach(b => b.classList.toggle('active', b.textContent === d.effectName));
+  $$('#bubbleGrid .bubble-chip').forEach(b => b.classList.toggle('active', b.textContent === d.bubble));
+  $$('.text-preset').forEach(b => b.classList.toggle('active', b.textContent === d.presetName));
+  updateTextPreview();
+}
+
+function syncTextUI() {
+  const d = S.textDraft;
+  $('#textInput').value = d.text || '';
+  $('#textSize').value = clamp(Number(d.size) || 38, 12, 180);
+  $('#textStrokeW').value = clamp(Number(d.strokeW) || 0, 0, 8);
+  $('#textShadowBlur').value = clamp(Number(d.shadowBlur) || 0, 0, 30);
+  $('#textSpacing').value = clamp(Number(d.letterSpacing) || 0, -5, 20);
+  $('#textLineH').value = clamp(Number(d.lineHeight) || 1.2, 0.8, 2.5);
+  $('#textOpacity').value = clamp(Number(d.opacity ?? 1), 0, 1);
+  $('#textDur').value = clamp(Number(d.dur) || 3, 0.5, 600);
+  $('#animDur').value = clamp(Number(d.animDur) || 0.6, 0.2, 2);
+  safeColor('#textColor', d.color || '#ffffff');
+  safeColor('#textStroke', d.stroke || '#000000');
+  safeColor('#textShadow', d.shadow || '#000000');
+  safeColor('#textBg', d.bg || '#000000');
+  syncTextButtons();
+}
+
+function safeColor(selector, value) {
+  const el = $(selector);
+  if (/^#[0-9a-f]{6}$/i.test(value)) el.value = value;
+  else el.value = '#000000';
+}
+
+function buildFontGrid() {
+  const fg = $('#fontGrid');
+  fg.innerHTML = '';
+  (window.TEXT_FONTS || []).forEach(f => {
+    const el = document.createElement('div');
+    el.className = 'font-item';
+    el.textContent = f.name;
+    el.style.fontFamily = f.css;
+    el.dataset.css = f.css;
+    el.dataset.name = f.name;
+    el.addEventListener('click', () => {
+      S.textDraft.fontCss = f.css;
+      S.textDraft.fontName = f.name;
+      syncTextButtons();
+    });
+    fg.appendChild(el);
+  });
+}
+
+function buildAnimList(id, list) {
+  const wrap = $('#' + id);
+  const label = wrap.querySelector('.anim-label');
+  wrap.innerHTML = '';
+  if (label) wrap.appendChild(label);
+  const prop = id === 'animIn' ? 'animIn' : id === 'animOut' ? 'animOut' : 'animLoop';
+  list.forEach(name => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'anim-chip';
+    b.textContent = name;
+    b.addEventListener('click', () => {
+      S.textDraft[prop] = name;
+      syncTextButtons();
+    });
+    wrap.appendChild(b);
+  });
+}
+
+function buildTextEffects() {
+  const eg = $('#textEffectGrid');
+  eg.innerHTML = '';
+  (window.TEXT_EFFECTS || []).forEach(eff => {
+    const b = document.createElement('div');
+    b.className = 'effect-chip';
+    b.textContent = eff.name;
+    b.addEventListener('click', () => {
+      S.textDraft.effectName = eff.name;
+      S.textDraft.effectCss = eff.css;
+      syncTextButtons();
+    });
+    eg.appendChild(b);
+  });
+}
+
+function buildTextBubbles() {
+  const bg = $('#bubbleGrid');
+  bg.innerHTML = '';
+  (window.TEXT_BUBBLES || []).forEach(name => {
+    const el = document.createElement('div');
+    el.className = 'bubble-chip';
+    el.textContent = name;
+    el.addEventListener('click', () => {
+      S.textDraft.bubble = name;
+      syncTextButtons();
+    });
+    bg.appendChild(el);
+  });
+}
+
+function buildTextPresetChips() {
+  const tp = $('#textPresets');
+  tp.innerHTML = '';
+  TEXT_PRESETS.forEach(name => {
+    const el = document.createElement('button');
+    el.type = 'button';
+    el.className = 'text-preset';
+    el.textContent = name;
+    el.addEventListener('click', () => applyTextPreset(name));
+    tp.appendChild(el);
+  });
+}
+
+function applyTextPreset(name) {
+  const sets = {
+    Title: { size: 64, bold: true, strokeW: 2, color: '#ffffff', fontCss: 'sans-serif', effectName: 'Shadow', effectCss: 'text-shadow:3px 3px 0 rgba(0,0,0,0.8),6px 6px 12px rgba(0,0,0,0.5);' },
+    Subtitle: { size: 36, bold: false, strokeW: 0, color: '#ffffff', fontCss: 'sans-serif', effectName: 'None', effectCss: '' },
+    Caption: { size: 24, bold: true, strokeW: 2, color: '#ffffff', fontCss: 'sans-serif', effectName: 'None', effectCss: '' },
+    Quote: { size: 32, bold: false, italic: true, color: '#ffe08a', fontCss: 'Georgia, serif', bubble: 'Quote', effectName: 'None', effectCss: '' },
+    Neon: { size: 50, bold: true, color: '#3df2b2', effectName: 'Neon', effectCss: 'text-shadow:0 0 8px currentColor,0 0 16px currentColor,0 0 32px currentColor;' },
+    Retro: { size: 44, bold: true, color: '#ffb347', fontCss: 'Impact, sans-serif', effectName: 'Retro', effectCss: 'text-shadow:3px 3px 0 #ff5470,6px 6px 0 #4ea8ff;' },
+    Minimal: { size: 34, bold: false, color: '#ffffff', fontCss: 'sans-serif', bubble: 'None', effectName: 'None', effectCss: '' },
+    Animated: { size: 50, bold: true, color: '#ffffff', animIn: 'Pop In', animLoop: 'Pulse', effectName: 'None', effectCss: '' }
+  };
+  const set = sets[name] || sets.Title;
+  const keep = { text: S.textDraft.text, dur: S.textDraft.dur, x: S.textDraft.x, y: S.textDraft.y, rotation: S.textDraft.rotation };
+  S.textDraft = { ...defaultTextDraft(), ...set, ...keep, presetName: name };
+  syncTextUI();
+}
+
+function openTextModal(preset) {
+  pause();
+  S.textDraft = defaultTextDraft();
+  S.editingTextClip = null;
+  $('#addTextBtn').textContent = 'Add to Timeline';
+  $$('.ttab').forEach(x => x.classList.toggle('active', x.dataset.ttab === 'style'));
+  $$('.ttab-panel').forEach(p => p.classList.toggle('hidden', p.id !== 'ttab-style'));
+  $('#textModal').classList.remove('hidden');
+  if (preset) applyTextPreset(preset);
+  syncTextUI();
+  setTimeout(() => { try { $('#textInput').focus(); } catch (e) {} }, 200);
+}
+
+function openTextFor(c) {
+  pause();
+  S.editingTextClip = c;
+  const base = defaultTextDraft();
+  S.textDraft = {
+    ...base,
+    ...textClipData({ ...base, ...c }),
+    text: c.text || '',
+    dur: c.duration(),
+    x: c.x ?? 0.5,
+    y: c.y ?? 0.35,
+    rotation: c.rotation || 0,
+    presetName: ''
+  };
+  $('#addTextBtn').textContent = 'Update Text';
+  $('#textModal').classList.remove('hidden');
+  syncTextUI();
+}
+
+function hideTextModal() {
+  $('#textModal').classList.add('hidden');
+  S.editingTextClip = null;
+  $('#addTextBtn').textContent = 'Add to Timeline';
+}
+
+function addTextClip() {
+  readTextForm();
+  if (!S.textDraft.text.trim()) { toast('Enter some text first'); return; }
+  const d = S.textDraft;
+  const start = clamp(S.playhead, 0, Math.max(0, totalDur() - 0.1));
+  const c = installClip({
+    id: uid(), type: 'text', ...textClipData(d),
+    start, end: start + d.dur, offset: 0, mediaDur: d.dur, z: 10,
+    x: d.x ?? 0.5, y: d.y ?? 0.35, rotation: d.rotation || 0, keyframes: []
+  });
+  S.clips.push(c);
+  hideTextModal();
+  renderTimeline();
+  select(c.id);
+  render();
+  saveHistory();
+  toast('Text added — drag it on the preview');
+}
+
+function updateTextClip() {
+  readTextForm();
+  const c = S.editingTextClip;
+  if (!c) { hideTextModal(); return; }
+  if (!S.textDraft.text.trim()) { toast('Enter some text first'); return; }
+  const d = S.textDraft;
+  Object.assign(c, textClipData(d));
+  c.end = c.start + d.dur;
+  if (Number.isFinite(d.rotation)) c.rotation = d.rotation;
+  hideTextModal();
+  renderTimeline();
+  refreshPanel();
+  render();
+  saveHistory();
+  toast('Text updated');
+}
+
+
+/* ---------------- preset validation ---------------- */
+const FILTER_LIMITS = {
+  brightness: [0.1, 3], contrast: [0.1, 3], saturate: [0, 4], hueRotate: [-180, 180],
+  sepia: [0, 1], grayscale: [0, 1], blurpx: [0, 20], warmth: [-1, 1],
+  tint: [-1, 1], fade: [0, 1], vignette: [0, 1]
+};
+
+function sanitizeFilters(f) {
+  const out = {};
+  if (!f || typeof f !== 'object') return out;
+  for (const k in FILTER_LIMITS) {
+    if (f[k] == null || f[k] === '') continue;
+    const v = Number(f[k]);
+    if (Number.isFinite(v)) out[k] = clamp(v, FILTER_LIMITS[k][0], FILTER_LIMITS[k][1]);
+  }
+  return out;
+}
+
+const TEXT_STYLE_KEYS = [
+  'fontCss', 'fontName', 'size', 'color', 'stroke', 'strokeW', 'shadow', 'shadowBlur',
+  'letterSpacing', 'lineHeight', 'opacity', 'bold', 'italic', 'underline', 'align',
+  'bg', 'animIn', 'animOut', 'animLoop', 'animDur', 'effectName', 'effectCss', 'bubble'
+];
+
+function sanitizeTextStyle(t) {
+  if (!t || typeof t !== 'object') return null;
+  const out = {};
+  for (const k of TEXT_STYLE_KEYS) {
+    const v = t[k];
+    if (v == null) continue;
+    if (k === 'fontCss' || k === 'fontName') {
+      if (typeof v === 'string' && v.length < 120 && !/url\s*\(|javascript:|expression/i.test(v)) out[k] = v;
+    } else if (k === 'color' || k === 'stroke' || k === 'shadow' || k === 'bg') {
+      if (isColor(v)) out[k] = String(v).slice(0, 40);
+    } else if (k === 'effectCss') {
+      if (typeof v === 'string' && v.length < 600) out[k] = v;
+    } else if (k === 'effectName') {
+      if (typeof v === 'string' && ['None', ...((window.TEXT_EFFECTS || []).map(e => e.name))].includes(v)) out[k] = v;
+    } else if (k === 'animIn' || k === 'animOut' || k === 'animLoop') {
+      const list = k === 'animIn' ? window.TEXT_ANIMATIONS_IN : k === 'animOut' ? window.TEXT_ANIMATIONS_OUT : window.TEXT_ANIMATIONS_LOOP;
+      if (Array.isArray(list) && list.includes(v)) out[k] = v;
+    } else if (k === 'bubble') {
+      if (Array.isArray(window.TEXT_BUBBLES) && window.TEXT_BUBBLES.includes(v)) out[k] = v;
+    } else if (k === 'align') {
+      if (['left', 'center', 'right'].includes(v)) out[k] = v;
+    } else if (k === 'bold' || k === 'italic' || k === 'underline') {
+      if (typeof v === 'boolean') out[k] = v;
+    } else {
+      const n = Number(v);
+      if (Number.isFinite(n)) {
+        const lim = k === 'size' ? [8, 400] : k === 'strokeW' ? [0, 12] : k === 'shadowBlur' ? [0, 60]
+          : k === 'letterSpacing' ? [-10, 30] : k === 'lineHeight' ? [0.7, 3] : k === 'opacity' ? [0, 1]
+            : k === 'animDur' ? [0.2, 2] : [0, 1];
+        out[k] = clamp(n, lim[0], lim[1]);
+      }
+    }
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function sanitizePresetData(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const effect = typeof data.effect === 'string' && (window.PRESETS_EFFECTS || []).includes(data.effect) ? data.effect : null;
+  return { filters: sanitizeFilters(data.filters), effect, textStyle: sanitizeTextStyle(data.textStyle) };
+}
+
+/* ---------------- presets ---------------- */
+function setupPresetModal() {
+  $('#importPreset').addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0];
+    if (f) importPresetFile(f, false);
+    e.target.value = '';
+  });
+  $('#exportPreset').addEventListener('click', saveCurrentAsPreset);
+}
+
+function openPresetModal() {
+  pause();
+  const list = $('#presetList');
+  list.innerHTML = '';
+  const c = selected();
+  if (c && !$('#presetName').value) $('#presetName').value = (c.name || c.type + ' preset').slice(0, 40);
+  const all = [
+    ...(window.BUILTIN_PRESETS || []).map(p => ({ name: p.name, data: p.data, builtin: true })),
+    ...loadUserPresets().map((p, i) => ({ name: p.name, data: p.data, builtin: false, index: i }))
+  ];
+  if (!all.length) list.appendChild(hint('No presets saved yet.'));
+  all.forEach(p => {
+    const row = document.createElement('div');
+    row.className = 'preset-item';
+    row.innerHTML = `<strong>${esc(p.name)}</strong><span class="preset-actions"></span>`;
+    const actions = $('.preset-actions', row);
+    const apply = document.createElement('button');
+    apply.type = 'button';
+    apply.className = 'mini-btn';
+    apply.textContent = 'Apply';
+    apply.addEventListener('click', () => {
+      const clip = selected();
+      if (!clip) { toast('Select a clip first'); return; }
+      applyPresetToClip(clip, p.data);
+      toast(`Applied “${p.name}”`);
+      closeModal($('#presetModal'));
+    });
+    actions.appendChild(apply);
+    if (!p.builtin) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'mini-btn';
+      del.textContent = 'Delete';
+      del.addEventListener('click', () => {
+        if (!confirm(`Delete preset “${p.name}”?`)) return;
+        const list = loadUserPresets();
+        list.splice(p.index, 1);
+        if (!saveUserPresets(list)) { toast('Could not save presets'); return; }
+        openPresetModal();
+        refreshHome();
+      });
+      actions.appendChild(del);
+    }
+    list.appendChild(row);
+  });
+  $('#presetModal').classList.remove('hidden');
+}
+
+function applyPresetToClip(c, data) {
+  const clean = sanitizePresetData(data);
+  if (!clean) return;
+  c.filters = { ...clean.filters };
+  c.effect = clean.effect;
+  c.overlayColor = null;
+  if (clean.textStyle && c.type === 'text') Object.assign(c, clean.textStyle);
+  renderTimeline();
+  render();
+  refreshPanel();
+  saveHistory();
+}
+
+function importPresetFile(file, fromHome) {
+  if (!file) return;
+  if (file.size > 512 * 1024) { toast('Preset file is too large'); return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      let d = JSON.parse(String(reader.result));
+      if (d && d.data && typeof d.data === 'object' && !Array.isArray(d.data) && !d.filters) d = { ...d.data, name: d.name || d.data.name };
+      if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('bad preset');
+      const name = String(d.name || file.name.replace(/\.[^.]+$/, '') || 'Imported').slice(0, 40);
+      const entry = { name, data: sanitizePresetData(d) };
+      const user = loadUserPresets();
+      user.push(entry);
+      if (!saveUserPresets(user)) { toast('Could not save the preset (storage full)'); return; }
+      toast('Preset imported');
+      refreshHome();
+      if (!fromHome) openPresetModal();
+    } catch (e) {
+      toast('Invalid preset file');
+    }
+  };
+  reader.onerror = () => toast('Could not read the preset file');
+  reader.readAsText(file);
+}
+
+function saveCurrentAsPreset() {
+  const c = selected();
+  if (!c) { toast('Select a clip first'); return; }
+  const name = ($('#presetName').value || c.name || c.type + ' preset').trim().slice(0, 40);
+  if (!name) { toast('Give the preset a name'); return; }
+  const textStyle = c.type === 'text'
+    ? { size: c.size, color: c.color, fontCss: c.fontCss, strokeW: c.strokeW, bold: c.bold, italic: c.italic, effectCss: c.effectCss, bubble: c.bubble }
+    : null;
+  const data = { name, filters: { ...(c.filters || {}) }, effect: c.effect || null, textStyle };
+  const user = loadUserPresets();
+  user.push({ name, data });
+  if (!saveUserPresets(user)) { toast('Could not save the preset (storage full)'); return; }
+  downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), name.replace(/\s+/g, '_') + '.kcpreset');
+  refreshHome();
+  openPresetModal();
+  toast('Preset saved');
+}
+
+/* ---------------- export ---------------- */
+function setupExportModal() {
+  $('#btnExport').addEventListener('click', () => {
+    document.body.classList.remove('exporting');
+    $('#exportModal').classList.remove('hidden');
+  });
+  $('#startExport').addEventListener('click', () => {
+    doExport().catch(err => {
+      console.error('Export failed', err);
+      restoreAfterExport();
+      toast('Export failed: ' + (err && err.message ? err.message : err));
+    });
+  });
+  $('#expCancel').addEventListener('click', () => finishExport(true));
+  $('#downloadBtn').addEventListener('click', async e => {
+    if (!S.lastExport) return;
+    if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+      e.preventDefault();
+      try {
+        const ok = await shareLastExport();
+        if (!ok) toast('Download is not available in this app');
+      } catch (err) {
+        toast('Share failed: ' + (err && err.message ? err.message : err));
+      }
+    }
+  });
+}
+
+function exportDimensions(res) {
+  const ar = ASPECTS[S.aspect] || 9 / 16;
+  let w, h;
+  if (ar <= 1) { w = res; h = res / ar; }
+  else { h = res; w = res * ar; }
+  w = Math.max(2, Math.round(w / 2) * 2);
+  h = Math.max(2, Math.round(h / 2) * 2);
+  return { w, h };
+}
+
+async function doExport() {
+  if (S.exportActive) return;
+  if (!S.clips.length) { toast('Add at least one clip first'); return; }
+  if (!window.MediaRecorder || !canvas.captureStream) { toast('Video export is not supported in this browser'); return; }
+  stopPlayback();
+
+  const res = Number($('#expRes').value) || 720;
+  const fps = Number($('#expFPS').value) || 30;
+  const br = Number($('#expBitrate').value) || 12000000;
+  const wm = $('#expWM').value;
+  const { w: eW, h: eH } = exportDimensions(res);
+
+  S._exportPrev = { playhead: S.playhead };
+  const cssW = canvas._w || (canvas.getBoundingClientRect && canvas.getBoundingClientRect().width) || eW;
+  S.exportScale = eW / Math.max(1, cssW);
+  S.exportWM = wm !== '0';
+  S.exportCancelled = false;
+
+  ensureAudio();
+  if (S.audioCtx && S.audioCtx.state !== 'running') {
+    try { await S.audioCtx.resume(); } catch (e) {}
+  }
+  if (S.master) { try { S.master.gain.value = 0; } catch (e) {} }
+
+  try {
+    S.exportDest = S.audioCtx ? S.audioCtx.createMediaStreamDestination() : null;
+    S.exportActive = true;
+    S.exporting = true;
+    document.body.classList.add('exporting');
+    S.playhead = 0;
+    canvas.width = eW;
+    canvas.height = eH;
+    canvas._w = eW;
+    canvas._h = eH;
+    render();
+
+    $('#expProgress').classList.remove('hidden');
+    $('#expResult').classList.add('hidden');
+    $('#expFill').style.width = '0%';
+    $('#expStatus').textContent = 'Preparing…';
+    $('#startExport').disabled = true;
+    $('#expCancel').classList.remove('hidden');
+
+    const videoStream = canvas.captureStream(fps);
+    const tracks = [...videoStream.getVideoTracks()];
+    if (S.exportDest) tracks.push(...S.exportDest.stream.getAudioTracks());
+    const combined = new MediaStream(tracks.filter(Boolean));
+    const mime = [
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8,opus',
+      'video/webm',
+      'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+      'video/mp4'
+    ].find(m => {
+      try { return MediaRecorder.isTypeSupported(m); } catch (e) { return false; }
+    }) || '';
+    if (!mime) throw new Error('No supported recording format');
+
+    const rec = new MediaRecorder(combined, {
+      mimeType: mime,
+      videoBitsPerSecond: br,
+      audioBitsPerSecond: 128000
+    });
+    S._rec = rec;
+    const chunks = [];
+    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    rec.onerror = err => {
+      console.error('Recorder error', err);
+      toast('Recording failed');
+      finishExport(true);
+    };
+    rec.onstop = () => {
+      const cancelled = S.exportCancelled;
+      const type = (mime.split(';')[0] || 'video/webm');
+      restoreAfterExport();
+      if (cancelled) { toast('Export cancelled'); return; }
+      if (!chunks.length) { toast('Export produced no video data'); return; }
+      const blob = new Blob(chunks, { type });
+      const ext = type.includes('mp4') ? 'mp4' : 'webm';
+      if (S.lastExport && S.lastExport.url) {
+        try { URL.revokeObjectURL(S.lastExport.url); } catch (e) {}
+      }
+      const url = URL.createObjectURL(blob);
+      S.lastExport = { blob, url, ext };
+      $('#exportPreview').src = url;
+      $('#downloadBtn').href = url;
+      $('#downloadBtn').download = `kriticut_${res}p_${Date.now()}.${ext}`;
+      $('#expResult').classList.remove('hidden');
+      toast('Export complete!');
+    };
+
+    S._exportStartedAt = performance.now();
+    rec.start(250);
+    render();
+  } catch (e) {
+    const rec = S._rec;
+    if (rec && rec.state !== 'inactive') {
+      try { rec.stop(); } catch (err) {}
+    }
+    restoreAfterExport();
+    throw e;
+  }
+}
+
+function updateExportProgress(now) {
+  if (!S.exportActive) return;
+  const total = totalDur();
+  const elapsed = (now - S._exportStartedAt) / 1000;
+  S.playhead = clamp(elapsed, 0, total);
+  syncMediaPlayback(S.playhead);
+  const p = clamp((S.playhead / total) * 100, 0, 100);
+  const fill = $('#expFill');
+  if (fill) fill.style.width = p + '%';
+  const status = $('#expStatus');
+  if (status) status.textContent = `Exporting ${$('#expRes').value}p… ${p.toFixed(0)}% · ${fmtTime(S.playhead)} / ${fmtTime(total)}`;
+  updatePlayheadUI();
+  if (S.playhead >= total) finishExport(false);
+}
+
+function finishExport(cancelled) {
+  if (!S.exportActive) return;
+  S.exportCancelled = !!cancelled;
+  S.exportActive = false;
+  S.exporting = false;
+  document.body.classList.remove('exporting');
+  stopPlayback();
+  if (S.master) { try { S.master.gain.value = 1; } catch (e) {} }
+  S.exportDest = null;
+  const rec = S._rec;
+  if (rec && rec.state !== 'inactive') {
+    try { rec.stop(); } catch (e) { restoreAfterExport(); }
+  } else {
+    restoreAfterExport();
+  }
+}
+
+function restoreAfterExport() {
+  S.exportActive = false;
+  S.exporting = false;
+  S.exportWM = false;
+  S.exportScale = 1;
+  S.exportDest = null;
+  S._rec = null;
+  document.body.classList.remove('exporting');
+  if (S.master) { try { S.master.gain.value = 1; } catch (e) {} }
+  $('#expProgress').classList.add('hidden');
+  $('#expCancel').classList.add('hidden');
+  $('#startExport').disabled = false;
+  $('#expFill').style.width = '0%';
+  const prev = S._exportPrev;
+  S._exportPrev = null;
+  if (prev && Number.isFinite(prev.playhead)) S.playhead = clamp(prev.playhead, 0, totalDur());
+  resizeCanvas();
+  renderTimeline();
+  updatePlayheadUI();
+  render();
+}
+
+async function shareLastExport() {
+  const le = S.lastExport;
+  if (!le) return false;
+  const C = window.Capacitor;
+  if (!C || !C.isNativePlatform || !C.isNativePlatform() || !C.Plugins) return false;
+  const F = C.Plugins.Filesystem;
+  const Sh = C.Plugins.Share;
+  if (!F || !Sh) return false;
+  const b64 = await blobToBase64(le.blob);
+  const name = $('#downloadBtn').download || `kriticut.${le.ext}`;
+  const res = await F.writeFile({ path: name, data: b64, directory: 'CACHE' });
+  if (res && res.uri) {
+    if (Sh.share) await Sh.share({ title: 'KritiCut export', url: res.uri });
+    return true;
+  }
+  return false;
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    a.remove();
+    try { URL.revokeObjectURL(url); } catch (e) {}
+  }, 1000);
+}
+
+/* ---------------- history ---------------- */
+function saveHistory() {
+  if (S._restoring) { updateUR(); return; }
+  S.history = S.history.slice(0, S.historyIdx + 1);
+  S.history.push(JSON.stringify({ clips: S.clips.map(serializeClip), playhead: S.playhead, welcomeId: S._welcomeId }));
+  if (S.history.length > MAX_HISTORY) S.history.shift();
+  S.historyIdx = S.history.length - 1;
+  updateUR();
+  markDirty();
+}
+
+function undo() {
+  if (S.historyIdx <= 0) { toast('Nothing to undo'); return; }
+  S.historyIdx--;
+  loadHist();
+  toast('Undo');
+}
+
+function redo() {
+  if (S.historyIdx >= S.history.length - 1) { toast('Nothing to redo'); return; }
+  S.historyIdx++;
+  loadHist();
+  toast('Redo');
+}
+
+function loadHist() {
+  const snap = S.history[S.historyIdx];
+  if (!snap) return;
+  try {
+    const d = JSON.parse(snap);
+    S.clips = (d.clips || []).map(installClip);
+    S._welcomeId = d.welcomeId || null;
+    S.playhead = clamp(Number(d.playhead) || 0, 0, totalDur());
+    S.selId = null;
+    stopPlayback();
+    hideClipPanel();
+    if (S.tab !== 'edit') renderTab(S.tab);
+    renderTimeline();
+    render();
+    updatePlayheadUI();
+    updateUR();
+    markDirty();
+  } catch (e) { console.warn('History restore failed', e); }
+}
+
+function updateUR() {
+  const u = $('#btnUndo'), r = $('#btnRedo');
+  if (!u || !r) return;
+  u.disabled = S.historyIdx <= 0;
+  r.disabled = S.historyIdx >= S.history.length - 1;
+}
+
+function setupUndoRedo() {
+  $('#btnUndo').addEventListener('click', undo);
+  $('#btnRedo').addEventListener('click', redo);
+  updateUR();
+}
+
+/* ---------------- keyboard ---------------- */
+function setupKeyboard() {
+  window.addEventListener('keydown', e => {
+    const t = e.target;
+    if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS') {
+      e.preventDefault();
+      saveDraft().then(() => toast('Draft saved')).catch(() => toast('Could not save the draft'));
+      return;
+    }
+    if (t && t.matches && t.matches('input,textarea,select,[contenteditable]')) {
+      if (e.key === 'Escape' && t.id === 'projectName') t.blur();
+      return;
+    }
+    if (editorScreen.classList.contains('hidden')) return;
+    const openModal = $$('.modal').some(m => !m.classList.contains('hidden'));
+    if (openModal) {
+      if (e.code === 'Escape') {
+        const m = $$('.modal').find(x => !x.classList.contains('hidden'));
+        if (m) closeModal(m);
       }
       return;
     }
-    requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
-}
-
-// ============================================================
-// History
-// ============================================================
-function saveHistory(){
-  S.history=S.history.slice(0,S.historyIdx+1);
-  const snap=S.clips.map(c=>{const x={...c};delete x.duration;delete x._kf;return x;});
-  S.history.push(JSON.stringify({clips:snap,playhead:S.playhead}));
-  if(S.history.length>50)S.history.shift();
-  S.historyIdx=S.history.length-1;updateUR();
-}
-function undo(){if(S.historyIdx>0){S.historyIdx--;loadHist();toast('Undo');}}
-function redo(){if(S.historyIdx<S.history.length-1){S.historyIdx++;loadHist();toast('Redo');}}
-function loadHist(){const s=JSON.parse(S.history[S.historyIdx]);S.clips=s.clips.map(c=>installClip(c));S.playhead=s.playhead;S.selId=null;stopPlayback();renderTimeline();render();updatePlayheadUI();updateUR();hideClipPanel();}
-function updateUR(){$('#btnUndo').disabled=S.historyIdx<=0;$('#btnRedo').disabled=S.historyIdx>=S.history.length-1;}
-function setupUndoRedo(){$('#btnUndo').addEventListener('click',undo);$('#btnRedo').addEventListener('click',redo);updateUR();}
-
-// ============================================================
-// Keyboard
-// ============================================================
-function setupKeyboard(){
-  window.addEventListener('keydown',e=>{
-    if(e.target.matches('input,textarea,select,[contenteditable]'))return;
-    if(e.code==='Space'){e.preventDefault();togglePlay();}
-    else if(e.code==='KeyS')splitAtPlayhead();
-    else if((e.code==='Delete'||e.code==='Backspace')&&S.selId){e.preventDefault();deleteSel();}
-    else if((e.ctrlKey||e.metaKey)&&e.code==='KeyZ'){e.preventDefault();e.shiftKey?redo():undo();}
-    else if(e.code==='ArrowLeft'){pause();S.playhead=Math.max(0,S.playhead-(e.shiftKey?1:0.1));updatePlayheadUI();render();}
-    else if(e.code==='ArrowRight'){pause();S.playhead=Math.min(totalDur(),S.playhead+(e.shiftKey?1:0.1));updatePlayheadUI();render();}
-    else if(e.code==='Escape')deselect();
+    if (e.code === 'Space' && !(t && t.closest && t.closest('button,a'))) { e.preventDefault(); togglePlay(); }
+    else if (e.code === 'KeyS' && !e.ctrlKey && !e.metaKey) { e.preventDefault(); splitAtPlayhead(); }
+    else if ((e.code === 'Delete' || e.code === 'Backspace') && S.selId) { e.preventDefault(); deleteSelected(); }
+    else if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+    else if ((e.ctrlKey || e.metaKey) && e.code === 'KeyY') { e.preventDefault(); redo(); }
+    else if (e.code === 'ArrowLeft') { e.preventDefault(); pause(); S.playhead = Math.max(0, S.playhead - (e.shiftKey ? 1 : 1 / 30)); updatePlayheadUI(); render(); }
+    else if (e.code === 'ArrowRight') { e.preventDefault(); pause(); S.playhead = Math.min(totalDur(), S.playhead + (e.shiftKey ? 1 : 1 / 30)); updatePlayheadUI(); render(); }
+    else if (e.code === 'Escape') { deselect(); }
   });
+}
+
+/* ---------------- service worker ---------------- */
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  if (!/^https?:$/.test(location.protocol)) return;
+  if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) return;
+  const register = () => {
+    navigator.serviceWorker.register('sw.js').catch(err => console.warn('Service worker registration failed', err));
+  };
+  if (document.readyState === 'complete') register();
+  else window.addEventListener('load', register, { once: true });
+}
+
+/* ---------------- text rendered into the exported video ---------------- */
+function textAnimState(c, lt, dur) {
+  const st = { alpha: 1, scale: 1, dx: 0, dy: 0, rot: 0, blur: 0, reveal: 1, glow: 0, hue: 0 };
+  const ad = clamp(Number(c.animDur) || 0.6, 0.2, 5);
+  const ease = p => (p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2);
+
+  const applyIn = (name, p) => {
+    const e = ease(p);
+    switch (name) {
+      case 'Fade In': st.alpha = e; break;
+      case 'Pop In': st.alpha = Math.min(1, p * 2); st.scale = p < 0.7 ? 0.3 + 0.8 * (p / 0.7) : 1.1 - 0.1 * ((p - 0.7) / 0.3); break;
+      case 'Slide Up': st.dy = (1 - e) * 0.28; st.alpha = p; break;
+      case 'Slide Down': st.dy = -(1 - e) * 0.28; st.alpha = p; break;
+      case 'Slide Left': st.dx = (1 - e) * 0.32; st.alpha = p; break;
+      case 'Slide Right': st.dx = -(1 - e) * 0.32; st.alpha = p; break;
+      case 'Typewriter': st.reveal = p; break;
+      case 'Scale In': st.scale = 3 - 2 * e; st.alpha = e; break;
+      case 'Blur In': st.blur = (1 - e) * 20; st.alpha = e; break;
+      case 'Spin In': st.rot = -360 * (1 - e); st.scale = e; st.alpha = e; break;
+      case 'Wave': st.rot = Math.sin(p * Math.PI * 4) * 5; st.alpha = p; break;
+      default: break;
+    }
+  };
+  const applyOut = (name, p) => {
+    const e = ease(p);
+    switch (name) {
+      case 'Fade Out': st.alpha = 1 - e; break;
+      case 'Pop Out': st.alpha = 1 - e; st.scale = 1 - 0.7 * e; break;
+      case 'Slide Up Out': st.dy = -e * 0.28; st.alpha = 1 - e; break;
+      case 'Slide Down Out': st.dy = e * 0.28; st.alpha = 1 - e; break;
+      case 'Slide Left Out': st.dx = -e * 0.32; st.alpha = 1 - e; break;
+      case 'Slide Right Out': st.dx = e * 0.32; st.alpha = 1 - e; break;
+      case 'Scale Out': st.scale = 1 + 2 * e; st.alpha = 1 - e; break;
+      case 'Blur Out': st.blur = e * 20; st.alpha = 1 - e; break;
+      default: break;
+    }
+  };
+
+  if (c.animIn && c.animIn !== 'None' && lt < ad) applyIn(c.animIn, clamp(lt / ad, 0, 1));
+  else if (c.animOut && c.animOut !== 'None' && lt > dur - ad) applyOut(c.animOut, clamp((lt - (dur - ad)) / ad, 0, 1));
+  else if (c.animLoop && c.animLoop !== 'None') {
+    switch (c.animLoop) {
+      case 'Pulse': st.scale = 1 + Math.sin(lt * 4) * 0.08; break;
+      case 'Bounce': st.dy = -Math.abs(Math.sin(lt * 4)) * 0.03; break;
+      case 'Wave': st.rot = Math.sin(lt * 4) * 5; break;
+      case 'Shake': st.dx = Math.sin(lt * 30) * 0.008; break;
+      case 'Glow': st.glow = 1; break;
+      case 'Rainbow': st.hue = (lt * 120) % 360; break;
+      case 'Neon Flicker': st.alpha = Math.sin(lt * 20) > 0.3 ? 1 : 0.6; break;
+      case 'Blink': st.alpha = Math.floor(lt * 2) % 2 ? 1 : 0.2; break;
+      default: break;
+    }
+  }
+  return st;
+}
+
+function roundRectPath(x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
+
+function bubblePalette(name) {
+  switch (name) {
+    case 'Rectangle': return { bg: 'rgba(0,0,0,0.65)', fg: null, radius: 2 };
+    case 'Rounded': return { bg: 'rgba(0,0,0,0.65)', fg: null, radius: 14 };
+    case 'Pill': return { bg: 'rgba(0,0,0,0.65)', fg: null, radius: 999 };
+    case 'Cloud': return { bg: '#ffffff', fg: '#111111', radius: 26 };
+    case 'Arrow Down': return { bg: '#ffffff', fg: '#111111', radius: 6, arrow: 'down' };
+    case 'Arrow Up': return { bg: '#ffffff', fg: '#111111', radius: 6, arrow: 'up' };
+    case 'Quote': return { bg: null, fg: null, radius: 0, quote: true };
+    case 'Callout': return { bg: '#ffffff', fg: '#111111', radius: 14 };
+    case 'Sticker': return { bg: '#ffffff', fg: '#111111', radius: 10 };
+    case 'Neon Box': return { bg: 'rgba(0,0,0,0.15)', fg: null, radius: 10, neon: true };
+    default: return { bg: null, fg: null, radius: 0 };
+  }
+}
+
+function wrapTextLines(text, maxWidth, size) {
+  const lines = [];
+  const pushChars = word => {
+    let cur = '';
+    for (const ch of word) {
+      if (cur && ctx.measureText(cur + ch).width > maxWidth) { lines.push(cur); cur = ch; }
+      else cur += ch;
+    }
+    if (cur) lines.push(cur);
+  };
+  for (const para of String(text).split('\n')) {
+    if (!para) { lines.push(''); continue; }
+    const words = para.split(/\s+/);
+    let line = '';
+    for (const word of words) {
+      const test = line ? line + ' ' + word : word;
+      if (ctx.measureText(test).width <= maxWidth) { line = test; continue; }
+      if (line) lines.push(line);
+      if (ctx.measureText(word).width > maxWidth) { pushChars(word); line = ''; }
+      else line = word;
+    }
+    if (line) lines.push(line);
+  }
+  return lines.length ? lines : [''];
+}
+
+function drawTextClipsOnCanvas(t, ox, oy, dw, dh) {
+  const scale = S.exportScale || 1;
+  for (const c of S.clips) {
+    if (c.type !== 'text') continue;
+    if (c.start > t || c.end <= t) continue;
+    const rawText = String(c.text || '');
+    if (!rawText.trim()) continue;
+    const kf = c._kf || {};
+    const anim = textAnimState(c, t - c.start, c.duration());
+    const opacity = clamp(Number(kf.opacity ?? c.opacity ?? 1), 0, 1) * anim.alpha;
+    if (opacity <= 0.01) continue;
+
+    const x = ox + dw * clamp(Number(kf.x ?? c.x ?? 0.5), 0, 1) + anim.dx * dw;
+    const y = oy + dh * clamp(Number(kf.y ?? c.y ?? 0.35), 0, 1) + anim.dy * dh;
+    const size = clamp(Number(kf.size ?? c.size ?? 38), 8, 400) * scale;
+    const rot = (Number(kf.rot ?? c.rotation ?? 0) + anim.rot) * Math.PI / 180;
+    const sc = (Number(kf.scale ?? 1) || 1) * anim.scale;
+
+    ctx.save();
+    ctx.globalAlpha = opacity;
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+    ctx.scale(sc, sc);
+    let filter = '';
+    if (anim.blur > 0) filter += `blur(${anim.blur * scale}px) `;
+    if (anim.hue > 0) filter += `hue-rotate(${anim.hue}deg) `;
+    if (filter && 'filter' in ctx) ctx.filter = filter;
+
+    const italic = c.italic || c.bubble === 'Quote';
+    ctx.font = `${italic ? 'italic ' : ''}${c.bold === false ? '500' : '800'} ${size}px ${c.fontCss || 'sans-serif'}`;
+    if ('letterSpacing' in ctx) {
+      try { ctx.letterSpacing = ((Number(c.letterSpacing) || 0) * scale) + 'px'; } catch (e) {}
+    }
+    ctx.textBaseline = 'middle';
+
+    const bubble = bubblePalette(c.bubble);
+    let text = rawText;
+    if (bubble.quote && !/^[“"]/.test(text)) text = '“' + text + '”';
+    const padX = (c.bubble === 'None' ? (c.bg ? 8 : 0) : c.bubble === 'Pill' ? 20 : 14) * scale;
+    const padY = (c.bubble === 'None' ? (c.bg ? 4 : 0) : 8) * scale;
+    const maxWidth = Math.max(size * 2, dw * 0.9 - padX * 2);
+    const lines = wrapTextLines(text, maxWidth, size);
+    const lineH = size * (Number(c.lineHeight) || 1.2);
+    const totalH = lines.length * lineH;
+    let maxW = 0;
+    for (const line of lines) maxW = Math.max(maxW, ctx.measureText(line).width);
+    const boxW = maxW + padX * 2;
+    const boxH = totalH + padY * 2;
+    let revealChars = Infinity;
+    if (anim.reveal < 1) {
+      let totalChars = 0;
+      for (const line of lines) totalChars += line.length;
+      revealChars = Math.ceil(totalChars * anim.reveal);
+    }
+
+    const eff = safeEffectStyle(c.effectCss);
+    const strokeFromEffect = eff['-webkit-text-stroke'] || eff['-webkit-text-stroke-width'];
+    let strokeW = Number(c.strokeW) || 0;
+    let strokeColor = c.stroke || '#000000';
+    if (strokeFromEffect) {
+      const m = String(strokeFromEffect).match(/([0-9.]+)px\s*(.*)/);
+      if (m) { strokeW = Number(m[1]) || strokeW; if (m[2]) strokeColor = m[2].trim(); }
+      if (strokeColor === 'currentColor') strokeColor = c.color || '#ffffff';
+    }
+    const colorTransparent = String(eff.color || eff['-webkit-text-fill-color'] || '').includes('transparent');
+    const bubbleBg = c.bg || bubble.bg;
+    const textColor = bubble.fg && (!c.color || c.color === '#ffffff') && !c.bg ? bubble.fg : (c.color || '#ffffff');
+
+    // Bubble / background
+    if (bubbleBg) {
+      ctx.save();
+      ctx.fillStyle = bubbleBg;
+      if (bubble.arrow === 'down') {
+        ctx.beginPath();
+        ctx.moveTo(-boxW / 2, -boxH / 2 - padY);
+        ctx.lineTo(boxW / 2, -boxH / 2 - padY);
+        ctx.lineTo(boxW / 2, boxH / 2 - padY * 0.2);
+        ctx.lineTo(0, boxH / 2 + padY);
+        ctx.lineTo(-boxW / 2, boxH / 2 - padY * 0.2);
+        ctx.closePath();
+        ctx.fill();
+      } else if (bubble.arrow === 'up') {
+        ctx.beginPath();
+        ctx.moveTo(-boxW / 2, -boxH / 2 + padY * 0.2);
+        ctx.lineTo(0, -boxH / 2 - padY);
+        ctx.lineTo(boxW / 2, -boxH / 2 + padY * 0.2);
+        ctx.lineTo(boxW / 2, boxH / 2 + padY);
+        ctx.lineTo(-boxW / 2, boxH / 2 + padY);
+        ctx.closePath();
+        ctx.fill();
+      } else {
+        roundRectPath(-boxW / 2, -boxH / 2, boxW, boxH, bubble.radius * scale);
+        ctx.fill();
+      }
+      if (bubble.neon) {
+        ctx.strokeStyle = c.color || '#3df2b2';
+        ctx.lineWidth = 2 * scale;
+        ctx.shadowColor = c.color || '#3df2b2';
+        ctx.shadowBlur = 16 * scale;
+        roundRectPath(-boxW / 2, -boxH / 2, boxW, boxH, bubble.radius * scale);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+      ctx.restore();
+    }
+    if (bubble.quote) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillRect(-boxW / 2 - 6 * scale, -boxH / 2, 4 * scale, boxH);
+      ctx.restore();
+    }
+
+    // Effect colours / shadow
+    let fillStyle = textColor;
+    let gradient = null;
+    const bgGradient = String(eff.background || eff['background-image'] || '');
+    if (/gradient/i.test(bgGradient)) {
+      const stops = [...bgGradient.matchAll(/#[0-9a-f]{3,8}|rgba?\([^)]*\)|hsla?\([^)]*\)/gi)].map(m => m[0]);
+      if (stops.length) {
+        gradient = ctx.createLinearGradient(-maxW / 2, 0, maxW / 2, 0);
+        stops.forEach((col, i) => gradient.addColorStop(i / Math.max(1, stops.length - 1), col));
+      }
+    }
+    let shadowBlur = Number(c.shadowBlur) > 0 ? Number(c.shadowBlur) * scale : 4 * scale;
+    let shadowColor = Number(c.shadowBlur) > 0 ? (c.shadow || '#000000') : 'rgba(0,0,0,0.6)';
+    const shadowRule = String(eff['text-shadow'] || '');
+    const sh = shadowRule.match(/(?:0\s+){0,2}([0-9.]+)px\s+(.*)/);
+    if (sh) {
+      shadowBlur = (Number(sh[1]) || 0) * scale;
+      if (/currentColor/i.test(shadowRule)) shadowColor = c.color || '#ffffff';
+      else {
+        const colMatch = shadowRule.match(/#[0-9a-f]{3,8}|rgba?\([^)]*\)/i);
+        if (colMatch) shadowColor = colMatch[0];
+      }
+    }
+    if (anim.glow) shadowBlur = 24 * scale, shadowColor = c.color || '#ffffff';
+    ctx.shadowColor = shadowColor;
+    ctx.shadowBlur = shadowBlur;
+
+    const align = c.align || 'center';
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i];
+      if (revealChars !== Infinity) {
+        line = line.slice(0, Math.max(0, revealChars));
+        revealChars -= lines[i].length;
+      }
+      let lx;
+      if (align === 'left') { lx = -maxW / 2; ctx.textAlign = 'left'; }
+      else if (align === 'right') { lx = maxW / 2; ctx.textAlign = 'right'; }
+      else { lx = 0; ctx.textAlign = 'center'; }
+      const ly = -totalH / 2 + lineH * (i + 0.5);
+      if (strokeW > 0) {
+        ctx.lineWidth = Math.max(1, strokeW * scale * 2);
+        ctx.strokeStyle = strokeColor;
+        ctx.lineJoin = 'round';
+        ctx.strokeText(line, lx, ly);
+      }
+      if (!colorTransparent || gradient || bubble.fg) {
+        ctx.fillStyle = gradient || (bubble.fg && (!c.color || c.color === '#ffffff') && !c.bg ? bubble.fg : fillStyle);
+        if (strokeW > 0 && colorTransparent) ctx.fillStyle = gradient || strokeColor;
+        if (!(strokeW > 0 && colorTransparent && !gradient)) ctx.fillText(line, lx, ly);
+      }
+      if (c.underline) {
+        const uw = ctx.measureText(line).width;
+        let ux = lx;
+        if (align === 'center') ux = lx - uw / 2;
+        else if (align === 'right') ux = lx - uw;
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = gradient ? (textColor || '#ffffff') : (c.color || textColor || '#ffffff');
+        ctx.lineWidth = Math.max(1, size * 0.05);
+        ctx.beginPath();
+        ctx.moveTo(ux, ly + size * 0.34);
+        ctx.lineTo(ux + uw, ly + size * 0.34);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
 }
 
 })();
