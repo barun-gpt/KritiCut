@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0f0f14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>KritiCut — Pro Video Editor</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- =========== HOME / LANDING PAGE =========== -->
+<div id="homeScreen" class="home-screen">
+  <div class="home-hero">
+    <div class="hero-logo">
+      <svg viewBox="0 0 120 120" width="84" height="84">
+        <defs>
+          <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#ff5470"/>
+            <stop offset="0.5" stop-color="#25c38e"/>
+            <stop offset="1" stop-color="#4ea8ff"/>
+          </linearGradient>
+        </defs>
+        <rect x="6" y="6" width="108" height="108" rx="26" fill="#17171f" stroke="url(#lg)" stroke-width="3"/>
+        <path d="M42 38l42 22-42 22z" fill="url(#lg)"/>
+      </svg>
+    </div>
+    <h1 class="hero-title">KritiCut</h1>
+    <p class="hero-sub">All-in-one video editor · Pro features · Always free</p>
+  </div>
+
+  <div class="home-actions">
+    <button class="big-new-btn" id="btnNewProject">
+      <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M17 10.5V7a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h12a1 1 0 001-1v-3.5l4 4v-11z"/></svg>
+      New Project
+    </button>
+    <button class="big-sec-btn" id="btnOpenProject">
+      <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M19 7h-3l-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2z"/></svg>
+      Open Draft
+    </button>
+    <button class="big-sec-btn" id="btnImportPresetHome">
+      <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7z"/></svg>
+      Import Preset
+    </button>
+    <input type="file" id="homePresetFile" accept=".json,.kcpreset" hidden>
+  </div>
+
+  <div class="home-section">
+    <div class="section-head">
+      <h2>Templates</h2>
+      <span class="section-sub">One-tap pro edits</span>
+    </div>
+    <div class="template-grid" id="templateGrid"></div>
+  </div>
+
+  <div class="home-section">
+    <div class="section-head">
+      <h2>Popular Presets</h2>
+      <span class="section-sub">One-click edit recipes</span>
+    </div>
+    <div class="preset-chips" id="homePresetChips"></div>
+  </div>
+
+  <div class="home-foot">
+    <span>v2.0 · Export up to 4K · PWA installable</span>
+  </div>
+</div>
+
+<!-- =========== EDITOR =========== -->
+<div id="editorScreen" class="editor-screen hidden">
+  <!-- TOP BAR -->
+  <header id="topbar">
+    <button class="icon-btn" id="btnHome" title="Home">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+    </button>
+    <div class="proj-name" contenteditable="true" id="projectName">My Project</div>
+    <button class="icon-btn" id="btnPreset" title="Preset">
+      <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 16.8l-6.2 4.5 2.4-7.4L2 9.4h7.6z"/></svg>
+    </button>
+    <button class="export-btn" id="btnExport">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 3v10.2l3.6-3.6 1.4 1.4L12 16l-5-5 1.4-1.4L12 13.2V3zM5 19h14v2H5z"/></svg>
+      Export
+    </button>
+  </header>
+
+  <!-- PREVIEW AREA -->
+  <section id="previewArea">
+    <div id="previewWrap">
+      <canvas id="previewCanvas"></canvas>
+      <div id="overlayLayer"></div>
+      <div id="bigPlay" class="big-play hidden">
+        <svg viewBox="0 0 80 80" width="80" height="80"><circle cx="40" cy="40" r="38" fill="rgba(0,0,0,0.55)" stroke="#fff" stroke-width="2"/><path d="M32 22l28 18-28 18z" fill="#25c38e"/></svg>
+      </div>
+      <div class="preview-controls">
+        <button class="pc-btn" id="btnPrevFrame">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M6 6h2v12H6zM9.5 12l8.5 6V6z"/></svg>
+        </button>
+        <button class="pc-btn pc-play" id="btnPlay">
+          <svg viewBox="0 0 24 24" width="28" height="28" id="playIcon"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+        </button>
+        <button class="pc-btn" id="btnNextFrame">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M16 6h2v12h-2zM6 18l8.5-6L6 6z"/></svg>
+        </button>
+      </div>
+      <div class="time-display"><span id="curTime">00:00</span> / <span id="totTime">00:00</span></div>
+      <div class="kf-hint hidden" id="kfHint">● Keyframe added</div>
+    </div>
+  </section>
+
+  <!-- BOTTOM TABS -->
+  <nav id="toolTabs">
+    <button class="tab-btn active" data-tab="edit">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M3 17.25V21h3.75L17.8 9.95l-3.75-3.75zM20.7 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75z"/></svg><span>Edit</span>
+    </button>
+    <button class="tab-btn" data-tab="audio">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 3v10.55A4 4 0 1014 17V7h4V3z"/></svg><span>Audio</span>
+    </button>
+    <button class="tab-btn" data-tab="text">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M5 4v3h5.5v12h3V7H19V4z"/></svg><span>Text</span>
+    </button>
+    <button class="tab-btn" data-tab="filters">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M18 4H6v2l6.5 6L6 18v2h12v-2l-6.5-6L18 6z"/></svg><span>Filters</span>
+    </button>
+    <button class="tab-btn" data-tab="effects">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 16.8l-6.2 4.5 2.4-7.4L2 9.4h7.6z"/></svg><span>Effects</span>
+    </button>
+    <button class="tab-btn" data-tab="overlay">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M21 19V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2zm-7-7l-5-5v3H3v4h6v3z"/></svg><span>Overlay</span>
+    </button>
+    <button class="tab-btn" data-tab="adjust">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M3 17v2h6v-2zM3 5v2h10V5zm10 16v-2h8v-2h-8v-2l-4 4zM7 9v2H3v2h4v2l4-4zm10 2V9h-4v2h4v2l4-4z"/></svg><span>Adjust</span>
+    </button>
+    <button class="tab-btn" data-tab="keyframes">
+      <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="5" cy="12" r="3" fill="currentColor"/><circle cx="12" cy="6" r="3" fill="currentColor"/><circle cx="19" cy="12" r="3" fill="currentColor"/><circle cx="12" cy="18" r="3" fill="currentColor"/></svg><span>Keyframe</span>
+    </button>
+  </nav>
+
+  <section id="clipPanel" class="clip-panel hidden">
+    <div class="panel-scroll" id="clipPanelContent"></div>
+  </section>
+
+  <div id="resizeHandle"><div class="rh-grip"></div></div>
+
+  <section id="timelineSection">
+    <div class="timeline-toolbar">
+      <button class="tl-btn" id="btnAdd">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>Import
+      </button>
+      <button class="tl-btn" id="btnSplit">✂ Split</button>
+      <button class="tl-btn" id="btnDelete">🗑 Delete</button>
+      <button class="tl-btn" id="btnDuplicate">⧉ Dup</button>
+      <div class="tl-spacer"></div>
+      <button class="tl-btn" id="btnKeyframe" title="Add keyframe at playhead">◆ Key</button>
+      <button class="tl-btn" id="btnUndo">↶</button>
+      <button class="tl-btn" id="btnRedo">↷</button>
+      <button class="tl-btn zoom-btn" id="btnZoomOut">−</button>
+      <span class="zoom-val" id="zoomVal">1×</span>
+      <button class="tl-btn zoom-btn" id="btnZoomIn">+</button>
+    </div>
+    <div class="timeline-scroll" id="timelineScroll">
+      <div class="ruler" id="ruler"></div>
+      <div class="playhead-line" id="playheadLine"></div>
+      <div class="tracks" id="tracks">
+        <div class="track" data-track="video"><div class="track-label">Video</div><div class="track-clips" id="videoClips"></div></div>
+        <div class="track" data-track="overlay"><div class="track-label">Overlay</div><div class="track-clips" id="overlayClips"></div></div>
+        <div class="track" data-track="text"><div class="track-label">Text</div><div class="track-clips" id="textClips"></div></div>
+        <div class="track" data-track="audio"><div class="track-label">Audio</div><div class="track-clips" id="audioClips"></div></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Import Media modal -->
+<div id="importModal" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>Import Media</h2><button class="close-btn" id="closeImport" aria-label="Close">✕</button>
+    </div>
+    <div class="import-grid">
+      <label class="import-card"><input type="file" accept="video/*" multiple id="importVideo" hidden><svg viewBox="0 0 24 24" width="32" height="32"><path fill="currentColor" d="M17 10.5V7a1 1 0 00-1-1H4a1 1 0 00-1 1v10a1 1 0 001 1h12a1 1 0 001-1v-3.5l4 4v-11z"/></svg><span>Video</span></label>
+      <label class="import-card"><input type="file" accept="image/*" multiple id="importImage" hidden><svg viewBox="0 0 24 24" width="32" height="32"><path fill="currentColor" d="M21 19V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2zM8.5 13.5l2.5 3 3.5-4.5 4.5 6H5z"/></svg><span>Photo</span></label>
+      <label class="import-card"><input type="file" accept="audio/*" multiple id="importAudio" hidden><svg viewBox="0 0 24 24" width="32" height="32"><path fill="currentColor" d="M12 3v10.55A4 4 0 1014 17V7h4V3z"/></svg><span>Audio</span></label>
+      <div class="import-card sample-card" id="addSample"><svg viewBox="0 0 24 24" width="32" height="32"><path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7z"/></svg><span>Sample</span></div>
+    </div>
+    <div class="media-library" id="mediaLibrary"></div>
+    <p class="hint">Tap a media item to add it to the timeline.</p>
+  </div>
+</div>
+
+<!-- Text editor modal (advanced) -->
+<div id="textModal" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header"><h2>Text Editor</h2><button class="close-btn" id="closeText" aria-label="Close">✕</button></div>
+    <input type="text" id="textInput" placeholder="Enter text..." class="text-input">
+    <div class="scroll-pills" id="textPresets"></div>
+
+    <div class="text-tabs" id="textTabsBar">
+      <button class="ttab active" data-ttab="style">Style</button>
+      <button class="ttab" data-ttab="font">Font</button>
+      <button class="ttab" data-ttab="animation">Animation</button>
+      <button class="ttab" data-ttab="effect">Effect</button>
+      <button class="ttab" data-ttab="bubble">Bubble</button>
+    </div>
+
+    <div class="ttab-panel" id="ttab-style">
+      <div class="color-row">
+        <label>Color <input type="color" id="textColor" value="#ffffff"></label>
+        <label>Stroke <input type="color" id="textStroke" value="#000000"></label>
+        <label>Shadow <input type="color" id="textShadow" value="#000000"></label>
+        <label>BG <input type="color" id="textBg" value="#00000000"></label>
+      </div>
+      <label>Size <input type="range" id="textSize" min="14" max="120" value="38"></label>
+      <label>Stroke width <input type="range" id="textStrokeW" min="0" max="8" value="0"></label>
+      <label>Shadow blur <input type="range" id="textShadowBlur" min="0" max="30" value="6"></label>
+      <label>Letter spacing <input type="range" id="textSpacing" min="-5" max="20" value="0"></label>
+      <label>Line height <input type="range" id="textLineH" min="0.8" max="2.5" step="0.05" value="1.2"></label>
+      <label>Opacity <input type="range" id="textOpacity" min="0" max="1" step="0.05" value="1"></label>
+      <div class="btn-row">
+        <button class="mini-btn" data-weight="left">⬅ Align L</button>
+        <button class="mini-btn" data-weight="center">⇔ Center</button>
+        <button class="mini-btn" data-weight="right">Align R ➡</button>
+        <button class="mini-btn" data-weight="bold"><b>B</b></button>
+        <button class="mini-btn" data-weight="italic"><i>I</i></button>
+        <button class="mini-btn" data-weight="underline"><u>U</u></button>
+      </div>
+    </div>
+
+    <div class="ttab-panel hidden" id="ttab-font">
+      <div class="font-grid" id="fontGrid"></div>
+    </div>
+
+    <div class="ttab-panel hidden" id="ttab-animation">
+      <p class="panel-title">In / Out / Loop</p>
+      <div class="anim-list" id="animIn"><div class="anim-label">In</div></div>
+      <div class="anim-list" id="animOut"><div class="anim-label">Out</div></div>
+      <div class="anim-list" id="animLoop"><div class="anim-label">Loop</div></div>
+      <label>Animation duration <input type="range" id="animDur" min="0.2" max="2" step="0.1" value="0.6"></label>
+    </div>
+
+    <div class="ttab-panel hidden" id="ttab-effect">
+      <div class="effect-grid" id="textEffectGrid"></div>
+    </div>
+
+    <div class="ttab-panel hidden" id="ttab-bubble">
+      <div class="bubble-grid" id="bubbleGrid"></div>
+    </div>
+
+    <label>Duration (s) <input type="number" id="textDur" min="0.5" max="60" value="3" step="0.5" style="width:100%;padding:8px;background:var(--bg3);color:#fff;border:1px solid var(--border);border-radius:6px;margin-top:6px"></label>
+    <button class="primary-btn" id="addTextBtn" style="margin-top:12px">Add to Timeline</button>
+  </div>
+</div>
+
+<!-- Preset modal -->
+<div id="presetModal" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header"><h2>Presets</h2><button class="close-btn" id="closePreset" aria-label="Close">✕</button></div>
+    <div class="import-grid">
+      <label class="import-card"><input type="file" accept=".json,.kcpreset" id="importPreset" hidden><svg viewBox="0 0 24 24" width="28" height="28"><path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7z"/></svg><span>Import</span></label>
+      <button class="import-card" id="exportPreset"><svg viewBox="0 0 24 24" width="28" height="28"><path fill="currentColor" d="M5 20h14v-2H5zM19 9h-4V3H9v6H5l7 7z"/></svg><span>Save Preset</span></button>
+      <button class="import-card" id="applyPreset"><svg viewBox="0 0 24 24" width="28" height="28"><path fill="currentColor" d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg><span>Apply to Clip</span></button>
+    </div>
+    <div class="preset-list" id="presetList"></div>
+  </div>
+</div>
+
+<!-- Export modal (with 4K) -->
+<div id="exportModal" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header"><h2>Export Video</h2><button class="close-btn" id="closeExport" aria-label="Close">✕</button></div>
+    <div class="export-opts">
+      <label>Resolution
+        <select id="expRes">
+          <option value="360">360p</option><option value="480">480p SD</option>
+          <option value="720" selected>720p HD</option>
+          <option value="1080">1080p FHD</option>
+          <option value="1440">1440p 2K</option>
+          <option value="2160">2160p 4K UHD</option>
+        </select>
+      </label>
+      <label>Frame Rate
+        <select id="expFPS"><option value="24">24 cin.</option><option value="30" selected>30</option><option value="60">60 smooth</option></select>
+      </label>
+      <label>Quality
+        <select id="expBitrate"><option value="3000000">Low</option><option value="6000000">Medium</option><option value="12000000" selected>High</option><option value="20000000">Very High</option><option value="40000000">Max (4K)</option></select>
+      </label>
+      <label>Watermark
+        <select id="expWM"><option value="0" selected>No watermark</option><option value="kriticut">KritiCut</option></select>
+      </label>
+    </div>
+    <div class="export-progress hidden" id="expProgress">
+      <div class="progress-bar"><div class="progress-fill" id="expFill"></div></div>
+      <p id="expStatus">Preparing...</p>
+    </div>
+    <button class="primary-btn" id="startExport">Start Export</button>
+    <div class="export-result hidden" id="expResult">
+      <video id="exportPreview" controls></video>
+      <a class="primary-btn" id="downloadBtn" download="kriticut.webm">Download Video</a>
+    </div>
+  </div>
+</div>
+
+<div id="loading" class="loading hidden"><div class="spinner"></div><p id="loadMsg">Loading...</p></div>
+<div id="toast" class="toast hidden"></div>
+
+<script src="filters.js"></script>
+<script src="text-features.js"></script>
+<script src="presets-data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

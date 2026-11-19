@@ -1,33 +1,32 @@
-# KritiCut – on-device video editor
+# KritiCut — Free Video Editor 🎬
 
-Everything runs on the phone (no server, no database). Media and the project are stored in the browser/app storage.
+A full-featured, mobile-first video editor in your browser — inspired by CapCut & VN, with every "premium" feature unlocked for free.
 
-## Test in a browser
-Serve the `www` folder over HTTP: `cd www && python3 -m http.server 8080`, then open http://localhost:8080 (use Chrome).
+## 🚀 Test on your computer
+Open your browser to **http://localhost:8080**
 
-## Expo Go preview
-This project now includes a lightweight Expo wrapper that loads the existing web app inside a native WebView. Run:
-```
-cd "D:\AI Apps\Video editing app\KritiCut-native-app-v3\kriticut"
-& "C:\Program Files\nodejs\npx.cmd" expo start --lan --clear --port 8081
-```
-Keep that Expo command running in one PowerShell window. In a second PowerShell window, run:
-```
-cd "D:\AI Apps\Video editing app\KritiCut-native-app-v3\kriticut"
-py -m http.server 8080 --directory .\www
-```
-Keep both commands running. Open the project in Expo Go on the same Wi‑Fi network and scan the QR code from the Expo terminal. The wrapper defaults to `http://192.168.1.68:8080`; replace the IP in the app with your computer's current Wi‑Fi IPv4 address if it changes. If the app cannot connect, allow Python through Windows Firewall on private networks and confirm the web URL opens on your phone's browser.
+A live animated "Welcome to KritiCut" demo clip renders instantly (no waiting for any sample to encode).
 
-## Build the Android APK
-**Option A – no Android Studio (GitHub):** push this folder to a GitHub repo, open Actions > "Build APK" > Run workflow, download the `KritiCut-debug-apk` artifact, unzip, install `app-debug.apk` on your phone (allow "install unknown apps").
+## 📱 Install on your Android phone
+1. Put phone on the same Wi-Fi as this computer.
+2. Get your PC's local IP (`hostname -I`).
+3. On Chrome for Android open `http://<YOUR-PC-IP>:8080`.
+4. Tap ⋮ → "Install app" / "Add to Home screen".
+5. KritiCut is now on your home screen and works offline (PWA).
 
-**Option B – locally** (Node 20+, JDK 21, Android Studio/SDK):
-```
-npm install
-npx cap add android
-npx cap sync android
-cd android && ./gradlew assembleDebug
-```
-**Voiceover needs the microphone:** after `npx cap add android`, add `RECORD_AUDIO` and `MODIFY_AUDIO_SETTINGS` permissions to `android/app/src/main/AndroidManifest.xml` (the GitHub workflow does this for you).
-
-APK: `android/app/build/outputs/apk/debug/app-debug.apk`
+## ✨ Features
+- Import video / image / audio from your device
+- Multi-track timeline (video / audio / text), drag to move, trim handles
+- Split, Duplicate, Delete, Rotate, Flip
+- Speed control 0.25× – 4×
+- Volume + fade-in / fade-out
+- 10 filters (Vivid, Warm, Cool, B&W, Vintage, Cinematic, Dreamy, Noir, Fade…)
+- Per-clip adjustments: brightness, contrast, saturation, hue, sepia, B&W, blur
+- Effects: Vignette, Shake, VHS, Zoom In, Spin
+- Text with 7 presets (Title, Subtitle, Caption, Quote, Neon, Retro, Minimal); custom font/size/color/stroke
+- Image overlays with opacity, scale, rotate
+- Undo / Redo (50 steps)
+- Zoomable timeline
+- Export: 480p / 720p / 1080p / 1440p, 24/30/60 fps, 4 quality levels → downloadable `.webm`
+- Keyboard shortcuts: Space (play), S (split), Del (delete), ←/→ (scrub), Ctrl+Z (undo)
+- CapCut-style dark UI, mobile-first 9:16 preview, PWA offline install
