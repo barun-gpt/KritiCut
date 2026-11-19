@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Generated Capacitor web payload and native projects
+www/
+android/
+ios/
+
+# Test / tooling output
+coverage/
+*.log
+.DS_Store
+
+# Local environment
+.env
+.env.*

@@ -1,31 +1,31 @@
 {
   "name": "kriticut",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "private": true,
-  "main": "node_modules/expo/AppEntry.js",
+  "description": "KritiCut — a full-featured, offline-first video editor for the browser and Android.",
   "scripts": {
-    "start": "expo start --lan",
-    "android": "expo run:android",
-    "ios": "expo run:ios",
-    "web": "expo start --web",
-    "serve:www": "python -m http.server 8080 --directory ./www"
+    "dev": "node scripts/serve.mjs",
+    "start": "node scripts/serve.mjs",
+    "build": "node scripts/build-www.mjs",
+    "test": "node tests/smoke.mjs",
+    "android:add": "npm run build && cap add android && npm run assets",
+    "android:sync": "npm run build && cap sync android && npm run assets",
+    "android:open": "cap open android",
+    "assets": "capacitor-assets generate --android --iconBackgroundColor \"#0f0f14\" --iconBackgroundColorDark \"#0f0f14\" --splashBackgroundColor \"#0f0f14\" --splashBackgroundColorDark \"#0f0f14\""
   },
   "dependencies": {
     "@capacitor/android": "^7.0.0",
     "@capacitor/core": "^7.0.0",
     "@capacitor/filesystem": "^7.0.0",
-    "@capacitor/share": "^7.0.0",
-    "expo": "~53.0.0",
-    "expo-status-bar": "~2.2.3",
-    "react": "19.0.0",
-    "react-dom": "19.0.0",
-    "react-native": "0.79.6",
-    "react-native-web": "~0.20.0",
-    "react-native-webview": "13.13.5"
+    "@capacitor/share": "^7.0.0"
   },
   "devDependencies": {
+    "@capacitor/assets": "^4.0.0",
     "@capacitor/cli": "^7.0.0",
-    "@expo/metro-runtime": "~5.0.0",
-    "babel-preset-expo": "~13.0.0"
+    "fake-indexeddb": "^6.0.0",
+    "jsdom": "^25.0.1"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
