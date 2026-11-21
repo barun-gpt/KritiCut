@@ -61,7 +61,7 @@ The **Build Android APK** workflow (`apk.yml`) runs on every push to `main`, eve
 1. Open **Actions → Build Android APK → Run workflow** (or pick a run).
 2. Download the **`kriticut-apk-<run>`** artifact — it contains
    - `kriticut-<version>-debug.apk` — signed with the debug key, **installs on any device**: allow "install unknown apps" and open it,
-   - `kriticut-<version>-release.apk` — signed release build (or unsigned when no signing secrets are configured).
+   - `kriticut-<version>-release.apk` — signed release build; without signing secrets it is published as `kriticut-<version>-release-unsigned.apk` (Android will not install it — use the debug APK instead).
 3. The **`kriticut-aab-<run>`** artifact holds `kriticut-<version>-release.aab` for uploading to Google Play.
 
 Pushing a tag also publishes both files on the GitHub Release:
