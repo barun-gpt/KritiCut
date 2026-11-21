@@ -1,8 +1,8 @@
 {
   "name": "kriticut",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
-  "description": "KritiCut — a full-featured, offline-first video editor for the browser and Android.",
+  "description": "KritiCut \u2014 a full-featured, offline-first video editor for the browser and Android.",
   "scripts": {
     "dev": "node scripts/serve.mjs",
     "start": "node scripts/serve.mjs",
@@ -11,7 +11,7 @@
     "android:add": "npm run build && cap add android && npm run assets",
     "android:sync": "npm run build && cap sync android && npm run assets",
     "android:open": "cap open android",
-    "assets": "capacitor-assets generate --android --iconBackgroundColor \"#0f0f14\" --iconBackgroundColorDark \"#0f0f14\" --splashBackgroundColor \"#0f0f14\" --splashBackgroundColorDark \"#0f0f14\""
+    "assets": "capacitor-assets generate --android --iconBackgroundColor \"#0a0a10\" --iconBackgroundColorDark \"#0a0a10\" --splashBackgroundColor \"#0a0a10\" --splashBackgroundColorDark \"#0a0a10\""
   },
   "dependencies": {
     "@capacitor/android": "^7.0.0",

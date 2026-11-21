@@ -1,5 +1,6 @@
-/* KritiCut service worker — offline shell + runtime cache */
-const CACHE = 'kriticut-v3';
+/* KritiCut service worker — offline app shell with stale-while-revalidate.
+   Bump CACHE whenever the shell files change so updates roll out cleanly. */
+const CACHE = 'kriticut-v4';
 const SHELL = [
   './',
   './index.html',
@@ -47,7 +48,7 @@ self.addEventListener('fetch', event => {
   try { url = new URL(req.url); } catch (e) { return; }
   if (url.origin !== self.location.origin) return;
 
-  // Navigations: network first so updates appear, fall back to the cached shell.
+  // Navigations: network first so a deployed update shows up, cached shell offline.
   if (req.mode === 'navigate') {
     event.respondWith(
       fetch(req)
@@ -61,7 +62,7 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Everything else: serve from cache, refresh in the background.
+  // Assets: serve cached immediately, refresh in the background.
   event.respondWith(
     caches.match(req).then(cached => {
       const network = fetch(req)
