@@ -40,7 +40,7 @@ Then open <http://localhost:8080>. The server prints a LAN URL so you can test o
 
 ## Android
 
-The Android app is a thin Capacitor wrapper around the same web app. `www/` is generated, never committed.
+The Android app is a thin Capacitor wrapper around the same web app. `www/` and `android/` are generated, never committed.
 
 ```bash
 npm install
@@ -48,12 +48,50 @@ npm run build          # creates www/ from the repo root
 npx cap add android    # once
 npm run assets         # launcher icons + splash screens
 npx cap sync android
-npx cap open android   # or ./gradlew assembleDebug
+npm run android:version  # versionName from package.json, versionCode from CI run / ANDROID_VERSION_CODE
+npx cap open android   # or cd android && ./gradlew assembleDebug
 ```
 
 `npm run android:add` / `npm run android:sync` wrap these steps.
 
-The `Build Android APK` GitHub Actions workflow does this automatically and uploads `app-debug.apk`. The `Web checks` workflow runs the smoke test and the web build on every push/PR.
+### Get an installable APK (.apk)
+
+The **Build Android APK** workflow (`apk.yml`) runs on every push to `main`, every pull request, tag pushes and on demand:
+
+1. Open **Actions → Build Android APK → Run workflow** (or pick a run).
+2. Download the **`kriticut-apk-<run>`** artifact — it contains
+   - `kriticut-<version>-debug.apk` — signed with the debug key, **installs on any device**: allow "install unknown apps" and open it,
+   - `kriticut-<version>-release.apk` — signed release build (or unsigned when no signing secrets are configured).
+3. The **`kriticut-aab-<run>`** artifact holds `kriticut-<version>-release.aab` for uploading to Google Play.
+
+Pushing a tag also publishes both files on the GitHub Release:
+
+```bash
+git tag v2.2.0 && git push origin v2.2.0
+```
+
+### Signed release builds
+
+The debug APK needs no setup. For a Play-Store-ready signed release, add these repository secrets (**Settings → Secrets and variables → Actions**):
+
+| Secret | Value |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | `base64 -w0 release.jks` |
+| `ANDROID_KEYSTORE_PASSWORD` | keystore password |
+| `ANDROID_KEY_ALIAS` | key alias |
+| `ANDROID_KEY_PASSWORD` | key password |
+
+Create the keystore once and keep it safe — Play only accepts updates signed with the same key:
+
+```bash
+keytool -genkeypair -v -keystore release.jks -alias kriticut \
+  -keyalg RSA -keysize 2048 -validity 10000
+base64 -w0 release.jks        # paste into ANDROID_KEYSTORE_BASE64
+```
+
+When the secrets are missing the workflow still builds and uploads the debug APK (and an unsigned `.aab`), so the pipeline never blocks on signing.
+
+The **Web checks** workflow runs the smoke test and the web build on every push/PR.
 
 ## Files
 
@@ -68,6 +106,9 @@ The `Build Android APK` GitHub Actions workflow does this automatically and uplo
 | `manifest.json`, `sw.js`, `icons/` | PWA metadata, offline cache, app icons |
 | `scripts/serve.mjs` | Zero-dependency dev server |
 | `scripts/build-www.mjs` | Generates `www/` for Capacitor |
+| `scripts/android-version.mjs` | Stamps versionName/versionCode into the generated Android project |
+| `scripts/collect-android.mjs` | Copies Gradle outputs into `dist/` with stable names |
+| `.github/workflows/apk.yml` | Builds the APK/AAB and uploads them as artifacts |
 | `resources/icon.png` | Source art for Android launcher icons and splash screens |
 | `tests/smoke.mjs` | Headless jsdom test of the real HTML + JS |
 

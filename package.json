@@ -10,6 +10,8 @@
     "test": "node tests/smoke.mjs",
     "android:add": "npm run build && cap add android && npm run assets",
     "android:sync": "npm run build && cap sync android && npm run assets",
+    "android:version": "node scripts/android-version.mjs",
+    "android:collect": "node scripts/collect-android.mjs",
     "android:open": "cap open android",
     "assets": "capacitor-assets generate --android --iconBackgroundColor \"#0a0a10\" --iconBackgroundColorDark \"#0a0a10\" --splashBackgroundColor \"#0a0a10\" --splashBackgroundColorDark \"#0a0a10\""
   },
