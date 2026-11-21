@@ -17,6 +17,15 @@ A full-featured, offline-first video editor that runs in the browser and ships t
 - **Autosave** — projects and imported media live in IndexedDB; reopen the last draft from the home screen.
 - **Installable PWA** — service worker caches the app shell for offline use.
 
+## Interface
+
+The UI is a dark, thumb-first studio: a **home screen** with resumable draft, templates and saved colour presets, and an **editor** with a focal preview, an eight-tool tab bar (Edit, Audio, Text, Filters, Effects, Overlay, Adjust, Keys), a collapsible inline tool panel and a four-track timeline with magnetic snapping.
+
+- Tapping a tool tab selects the clip under the playhead automatically, so a tap is never a dead end.
+- Sliders show live values; presets, effects, fonts, animations and bubbles render with their own preview swatches.
+- Every destructive action (new project, delete clip/media/draft, start export) asks in-app instead of using `confirm()`.
+- Layout adapts from 320 px phones to desktop, with a focus mode for the preview and a drag handle to resize the timeline.
+
 ## Run it
 
 The web app is plain HTML/CSS/JS with no build step. Any static server works:

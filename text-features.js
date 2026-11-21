@@ -13,11 +13,11 @@
     { name: 'Mono', css: '"Courier New", Courier, monospace' },
     { name: 'Cursive', css: '"Brush Script MT", cursive' },
     { name: 'Impact', css: 'Impact, "Arial Black", sans-serif' },
-    { name: 'Handwriting', css: '"Comic Sans MS", cursive' },
+    { name: 'Handwriting', css: '"Segoe Script", "Bradley Hand", cursive' },
     { name: 'Futura', css: '"Trebuchet MS", sans-serif' },
     { name: 'Classic', css: '"Palatino Linotype", serif' },
     { name: 'Bebas', css: '"Arial Narrow", Impact, sans-serif' },
-    { name: 'Comic', css: '"Comic Sans MS", cursive' },
+    { name: 'Comic', css: '"Comic Sans MS", "Chalkboard SE", "Segoe Print", cursive' },
     { name: 'Didot', css: 'Didot, "Times New Roman", serif' }
   ];
 
@@ -32,7 +32,7 @@
     { name: 'Shadow', css: 'text-shadow:3px 3px 0 rgba(0,0,0,0.8),6px 6px 12px rgba(0,0,0,0.5);' },
     { name: 'Emboss', css: 'text-shadow:1px 1px 0 #fff,-1px -1px 0 #000;' },
     { name: '3D', css: 'text-shadow:1px 1px 0 #000,2px 2px 0 #000,3px 3px 0 #000,4px 4px 8px rgba(0,0,0,0.6);' },
-    { name: 'Outline', css: '-webkit-text-stroke:3px currentColor;color:transparent;' },
+    { name: 'Outline', css: '-webkit-text-stroke:2.5px #ffffff;color:transparent;' },
     { name: 'Hollow', css: '-webkit-text-stroke:2px #fff;color:transparent;' },
     { name: 'Mirror', css: '-webkit-box-reflect:below 4px linear-gradient(transparent,rgba(0,0,0,0.4));' },
     { name: 'Gradient', css: 'background:linear-gradient(90deg,#ff5470,#25c38e,#4ea8ff);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;' },
