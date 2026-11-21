@@ -5,8 +5,11 @@
  * names differ slightly between AGP versions and between signed and unsigned
  * release builds. This script finds whatever was produced and copies it to
  *   dist/kriticut-<version>-debug.apk
- *   dist/kriticut-<version>-release.apk
+ *   dist/kriticut-<version>-release.apk            (signed)
+ *   dist/kriticut-<version>-release-unsigned.apk   (no signing secrets)
  *   dist/kriticut-<version>-release.aab
+ * The unsigned suffix matters: Android refuses to install an unsigned APK,
+ * so the name should not look like a drop-in replacement for the signed one.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -50,8 +53,10 @@ const copy = (src, name) => {
   copied.push({ name, size: fs.statSync(dest).size });
 };
 
+const releaseName = signedApk ? 'release' : 'release-unsigned';
+
 if (debugApk) copy(debugApk, `kriticut-${version}-debug.apk`);
-if (releaseApk) copy(releaseApk, `kriticut-${version}-release.apk`);
+if (releaseApk) copy(releaseApk, `kriticut-${version}-${releaseName}.apk`);
 if (aab) copy(aab, `kriticut-${version}-release.aab`);
 
 if (!copied.length) {
